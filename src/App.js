@@ -206,6 +206,28 @@ function Toggle({ value, onChange, label }) {
   );
 }
 
+function BatteryBar({ pct }) {
+  const color = pct > 50 ? "#34D399" : pct > 20 ? "#FBBF24" : T.danger;
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+      <div style={{
+        width: 36, height: 12, borderRadius: 3,
+        border: `1px solid ${T.border}`, background: T.elevated,
+        position: "relative", overflow: "hidden", flexShrink: 0,
+      }}>
+        <div style={{
+          position: "absolute", top: 0, left: 0, bottom: 0,
+          width: `${Math.max(0, Math.min(100, pct))}%`,
+          background: color, transition: "width 0.3s, background 0.3s",
+        }} />
+      </div>
+      <span style={{ color: T.textSecondary, fontSize: 11, fontWeight: 700, fontFamily: "'JetBrains Mono', monospace" }}>
+        {pct}%
+      </span>
+    </div>
+  );
+}
+
 function SectionLabel({ children }) {
   return (
     <div style={{
@@ -752,14 +774,26 @@ export default function App() {
   useEffect(() => { save("nd_iconrules", iconRules); }, [iconRules]);
 
   const activeConnection = connections.find(c => c.id === activeConnectionId) ?? null;
+  const DUPLICATE_WINDOW_MS = 2000;
 
   const mergeNotifications = (incoming) => {
     setNotifications(prev => {
       const existingIds = new Map(prev.map(n => [n.id, n]));
       const merged = [...prev];
       const brandNew = [];
+
       for (const n of incoming) {
         if (deletedSetRef.current.has(n.id)) continue;
+
+        // Check for a near-duplicate: same app + title + text within a short time window
+        const isDuplicate = merged.some(existing =>
+          existing.packageName === n.packageName &&
+          existing.title === n.title &&
+          existing.text === n.text &&
+          Math.abs(existing.timestamp - n.timestamp) <= DUPLICATE_WINDOW_MS
+        );
+        if (isDuplicate) continue;
+
         if (!existingIds.has(n.id)) { merged.push(n); brandNew.push(n.id); }
         else {
           const ex = existingIds.get(n.id);
@@ -846,6 +880,13 @@ export default function App() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+  if (activeConnection?.url) {
+    connect(false);
+  }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+}, []);
 
   const deleteOne = (id) => {
     const n = notifications.find(x => x.id === id);
@@ -943,7 +984,7 @@ export default function App() {
           </Tag>
 
           {connected && stats.batteryPct !== null && (
-            <Tag>🔋 {stats.batteryPct}%</Tag>
+            <BatteryBar pct={stats.batteryPct} />
           )}
           {connected && stats.screenTimeMs !== null && stats.screenTimeMs >= 0 && (
             <Tag>📱 {formatDuration(stats.screenTimeMs)}</Tag>
