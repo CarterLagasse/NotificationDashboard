@@ -3,25 +3,33 @@ import { useState, useEffect, useRef } from "react";
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const JUNK_PREFIXES = [
-  "Flashlight turned on",
-  "Charging started (",
-  "Charging (",
-  "Connecting to your PC",
-  "Your devices are connected",
-  "Turn off your upcoming alarm",
-  "Alarm set for",
-  "Screenshot saved",
   "Make sure your device is connected to the Internet.",
-  "Turning on Location History qualifies you for more surveys",
-  "Want more surveys? Finish your profile to get more surveys.",
-  "Refining picture..."
 ];
 
 const JUNK_PACKAGES = [
-  "android",
-  "com.android.systemui",
-  "com.android.system",
+  "com.android.deskclock"
+  // "android",
+  // "com.android.systemui",
+  // "com.android.system",
 ];
+
+// Apps that are muted by default — notifications from these packages are
+// dropped UNLESS the title or text starts with one of the listed prefixes.
+const APP_ALLOWLIST_FILTERS = {
+  // "com.android.dialer":            ["Missed call"],
+  // "com.google.android.dialer":     ["Missed call"],
+  // "com.samsung.android.dialer":    ["Missed call"],
+  // "com.samsung.android.incallui":  ["Missed call"],
+};
+
+const APP_BANNED_PREFIXES = {
+  "com.samsung.android.incallui":      ["Call"],
+  "com.android.systemui":              ["Flashlight turned on", "Charging started (", "Charging (", "Edge lighting"],
+  "com.google.android.apps.paidtasks": ["Turning on Location History", "Want more surveys? Finish"],
+  "com.sec.android.gallery3d":         ["Screenshot saved", "Refining picture..."],
+  "com.sec.android.app.camera":        ["Screenshot saved", "Refining picture..."],
+  "com.microsoft.appmanager":          ["Connecting to your PC", "Your devices are connected"],
+};
 
 const APP_COLORS = {
   "com.instagram.android":             "#E1306C",
@@ -134,6 +142,22 @@ function resolveIcon(n, iconRules) {
     if (rule.matchType === "keyword" && text.includes(rule.matchValue.toLowerCase())) return rule;
   }
   return null;
+}
+
+function passesAppAllowlist(n) {
+  const allowedPrefixes = APP_ALLOWLIST_FILTERS[n.packageName];
+  if (!allowedPrefixes || allowedPrefixes.length === 0) return true; // no restriction for this app
+  const title = n.title || "";
+  const text = n.text || "";
+  return allowedPrefixes.some(p => title.startsWith(p) || text.startsWith(p));
+}
+
+function passesAppBannedPrefixes(n) {
+  const bannedPrefixes = APP_BANNED_PREFIXES[n.packageName];
+  if (!bannedPrefixes || bannedPrefixes.length === 0) return true; // no bans for this app
+  const title = n.title || "";
+  const text = n.text || "";
+  return !bannedPrefixes.some(p => title.startsWith(p) || text.startsWith(p));
 }
 
 // ─── Primitive Components ─────────────────────────────────────────────────────
@@ -866,6 +890,8 @@ export default function App() {
         if (!combined) return;
         if (JUNK_PREFIXES.some(p => combined.startsWith(p))) return;
         if (JUNK_PACKAGES.includes(raw.packageName)) return;
+        if (!passesAppAllowlist(raw)) return;
+        if (!passesAppBannedPrefixes(raw)) return;
         mergeNotifications([{ ...raw, id: generateId(raw), starred: false, group: null }]);
       } catch (e) { console.warn("Bad payload", e); }
     };

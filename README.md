@@ -171,36 +171,45 @@ Confirm clean output: `Serving on http://localhost:3000` with no errors.
 pm2 save
 ```
 
-This ensures PM2 remembers this process so it can be restored later with `pm2 resurrect`.
+This takes a snapshot of whatever is currently running under PM2 (in this case, `notification-dashboard`) and writes it to disk. This snapshot — not whatever happens to be running at the moment of a restart — is what gets restored on boot. Any time you add, remove, or reconfigure a PM2 process and want that reflected after a restart, run `pm2 save` again to update the snapshot.
 
 ---
 
 ## Auto-Start on Windows Boot (Optional but Recommended)
 
-By default, if your PC restarts, PM2's process list needs to be manually restored with `pm2 resurrect`. To make this automatic on every boot:
+By default, if your PC restarts, PM2's process list needs to be manually restored with `pm2 resurrect`. To make this automatic on every boot, install `pm2-windows-startup` — a small utility that adds a registry entry so `pm2 resurrect` runs automatically when you log into Windows.
 
-### Step 1 — Open Task Scheduler
+### Step 1 — Install the Utility
 
-Search "Task Scheduler" in the Windows Start menu.
+Still in Command Prompt:
 
-### Step 2 — Create the Task
+```
+npm install pm2-windows-startup -g
+```
 
-1. Click **Create Basic Task**
-2. Name it `PM2 Resurrect`
-3. Trigger: **When the computer starts**
-4. Action: **Start a program**
-5. Program/script:
-   ```
-   "C:\Program Files\nodejs\node.exe"
-   ```
-6. Add arguments:
-   ```
-   "C:\Users\yourname\AppData\Roaming\npm\node_modules\pm2\bin\pm2" resurrect
-   ```
-   (Adjust the username in the path to match your system.)
-7. Click **Finish**
+### Step 2 — Register It
 
-Now every time Windows boots, this task automatically runs `pm2 resurrect`, which restores whatever was saved with `pm2 save` — bringing the dashboard back online with no manual steps.
+```
+pm2-startup install
+```
+
+That's it — no dialogs, no manually filling in paths. PM2 will now automatically resurrect your saved process list every time you log into Windows.
+
+**Note:** this triggers on login, not on boot itself. If this PC ever restarts and sits at the lock screen without anyone logging in, the dashboard won't come back until someone signs in. For a normal desktop you log into shortly after it boots, this isn't an issue.
+
+### Step 3 — Verify It's Registered
+
+```
+pm2-startup
+```
+
+This confirms the startup entry is installed. You can also check **Task Manager → Startup apps** — you should see an entry associated with `pm2-windows-startup`.
+
+To remove it later, if ever needed:
+
+```
+pm2-startup uninstall
+```
 
 ---
 
@@ -208,7 +217,7 @@ Now every time Windows boots, this task automatically runs `pm2 resurrect`, whic
 
 Once set up, the dashboard runs continuously at `http://localhost:3000`. You don't need to keep any terminal or VSCode window open — PM2 manages the process independently in the background.
 
-If your PC restarts and, for whatever reason, the Task Scheduler task doesn't fire, you can always manually restore it:
+If your PC restarts and, for whatever reason, the auto-start doesn't fire, you can always manually restore it:
 
 ```
 pm2 resurrect
@@ -236,20 +245,3 @@ pm2 restart notification-dashboard
 This reloads the server with the freshly built files — no need to delete or reconfigure anything.
 
 **Note:** if your browser still shows old content after restarting, do a hard refresh (`Ctrl+Shift+R`) to clear cached assets.
-
----
-
-## Troubleshooting
-
-**`pm2 list` shows status `stopped` or `errored`**
-Check the logs for the actual error:
-```
-pm2 logs notification-dashboard --lines 30
-```
-Common causes: `server.js` wasn't found at the expected path (double check the `pm2 start` command uses the correct path and was run from Command Prompt, not Git Bash), or `serve-handler` wasn't installed in the same folder as `server.js`.
-
-**Dashboard loads but shows no notifications**
-This is a dashboard/phone connection issue, not a PM2 issue — see the Android app's README for WebSocket connection troubleshooting.
-
-**Changes to the code aren't showing up**
-Confirm you ran `npm run build` after your last edit, then `pm2 restart notification-dashboard`, then hard-refreshed your browser.
