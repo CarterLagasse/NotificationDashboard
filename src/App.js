@@ -1,5 +1,14 @@
 import { useState, useEffect, useRef } from "react";
 
+//If the restart fails:
+//pm2 start C:\notif-server\server.js --name notification-dashboard
+//Pm2 save
+
+//For updating code:
+//npm run build
+//pm2 restart notification-dashboard
+
+
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const JUNK_PREFIXES = [
@@ -7,8 +16,8 @@ const JUNK_PREFIXES = [
 ];
 
 const JUNK_PACKAGES = [
-  "com.android.deskclock"
-  // "android",
+  "com.android.deskclock",
+  "com.sec.android.app.clockpackage",
   // "com.android.systemui",
   // "com.android.system",
 ];
@@ -25,10 +34,14 @@ const APP_ALLOWLIST_FILTERS = {
 const APP_BANNED_PREFIXES = {
   "com.samsung.android.incallui":      ["Call"],
   "com.android.systemui":              ["Flashlight turned on", "Charging started (", "Charging (", "Edge lighting"],
-  "com.google.android.apps.paidtasks": ["Turning on Location History", "Want more surveys? Finish"],
+  "com.google.android.apps.paidtasks": ["Turning on Location History", "Want more surveys? Finish", "New survey available"],
   "com.sec.android.gallery3d":         ["Screenshot saved", "Refining picture..."],
   "com.sec.android.app.camera":        ["Screenshot saved", "Refining picture..."],
   "com.microsoft.appmanager":          ["Connecting to your PC", "Your devices are connected"],
+  "android":                           ["Private DNS", "An open"],
+  "com.google.android.apps.maps":      ["From "],
+  "com.sec.android.app.samsungapps":   ["1 update available"],
+
 };
 
 const APP_COLORS = {
@@ -133,13 +146,24 @@ function compressImage(file) {
   });
 }
 
+// Splits a comma-separated keyword string into a clean list of lowercase keywords.
+function parseKeywords(raw) {
+  return (raw || "")
+    .split(",")
+    .map(k => k.trim().toLowerCase())
+    .filter(Boolean);
+}
+
 function resolveIcon(n, iconRules) {
   for (const rule of iconRules) {
     if (rule.matchType === "app" && rule.matchValue === n.packageName) return rule;
   }
   const text = `${n.appName} ${n.title || ""} ${n.text || ""}`.toLowerCase();
   for (const rule of iconRules) {
-    if (rule.matchType === "keyword" && text.includes(rule.matchValue.toLowerCase())) return rule;
+    if (rule.matchType === "keyword") {
+      const keywords = parseKeywords(rule.matchValue);
+      if (keywords.some(k => text.includes(k))) return rule;
+    }
   }
   return null;
 }
@@ -345,8 +369,12 @@ function NotificationCard({ notification: n, onDelete, onStar, onGroupAssign, gr
     return () => document.removeEventListener("mousedown", h);
   }, [showGroupMenu]);
 
+  const handleCardClick = () => {
+    if (selectMode) onSelect(n.id);
+  };
+
   return (
-    <div style={{
+    <div onClick={handleCardClick} style={{
       background: selected ? "#1A1A2E" : T.surface,
       border: `1px solid ${selected ? T.primary : T.border}`,
       borderLeft: `3px solid ${n.starred ? T.star : color}`,
@@ -354,13 +382,10 @@ function NotificationCard({ notification: n, onDelete, onStar, onGroupAssign, gr
       animation: isNew ? "slideIn 0.25s ease" : "none",
       transition: "border-color 0.15s, background 0.15s",
       display: "flex", gap: 11, alignItems: "flex-start",
+      cursor: selectMode ? "pointer" : "default",
     }}>
       <div style={{ paddingTop: 2, flexShrink: 0 }}>
-        {selectMode
-          ? <input type="checkbox" checked={selected} onChange={() => onSelect(n.id)}
-              style={{ cursor: "pointer", width: 14, height: 14, accentColor: T.primary, marginTop: 6 }} />
-          : <NotifIcon rule={iconRule} color={color} size={30} />
-        }
+        <NotifIcon rule={iconRule} color={color} size={30} />
       </div>
 
       <div style={{ flex: 1, minWidth: 0 }}>
@@ -380,12 +405,12 @@ function NotificationCard({ notification: n, onDelete, onStar, onGroupAssign, gr
             {timeMode === "relative" ? timeAgo(n.timestamp) : formatAbsolute(n.timestamp)}
           </span>
 
-          <IconBtn onClick={() => onStar(n.id)} title={n.starred ? "Unstar" : "Star"}
+          <IconBtn onClick={(e) => { e.stopPropagation(); onStar(n.id); }} title={n.starred ? "Unstar" : "Star"}
             color={n.starred ? T.star : T.textMuted} size={17}>
             {n.starred ? "★" : "☆"}
           </IconBtn>
 
-          <div ref={menuRef} style={{ position: "relative" }}>
+          <div ref={menuRef} onClick={(e) => e.stopPropagation()} style={{ position: "relative" }}>
             <IconBtn onClick={() => setShowGroupMenu(v => !v)} title="Assign group"
               color={n.group ? T.primary : T.textMuted} size={15}>
               ⊞
@@ -419,7 +444,7 @@ function NotificationCard({ notification: n, onDelete, onStar, onGroupAssign, gr
             )}
           </div>
 
-          <IconBtn onClick={() => onDelete(n.id)} title="Delete" color={T.textMuted} size={20}>×</IconBtn>
+          <IconBtn onClick={(e) => { e.stopPropagation(); onDelete(n.id); }} title="Delete" color={T.textMuted} size={20}>×</IconBtn>
         </div>
 
         {n.title && (
@@ -615,7 +640,8 @@ function SettingsPanel({ connections, activeConnectionId, onConnectionsChange, o
       <Card>
         <SectionLabel>Notification Icons</SectionLabel>
         <div style={{ color: T.textSecondary, fontSize: 12, marginBottom: 12, lineHeight: 1.6 }}>
-          Assign a custom icon — an emoji or uploaded image — to notifications from a specific app or containing a keyword.
+          Assign a custom icon — an emoji or uploaded image — to notifications from a specific app or containing one or more keywords.
+          Separate multiple keywords with commas; a notification matches if it contains any of them.
           Images are compressed to 64×64px and stored locally.
         </div>
 
@@ -630,7 +656,7 @@ function SettingsPanel({ connections, activeConnectionId, onConnectionsChange, o
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ color: T.textPrimary, fontSize: 13, fontWeight: 600 }}>{rule.name || rule.matchValue}</div>
                 <div style={{ color: T.textSecondary, fontSize: 11, fontFamily: "'JetBrains Mono', monospace" }}>
-                  {rule.matchType === "app" ? "app: " : "keyword: "}{rule.matchValue}
+                  {rule.matchType === "app" ? "app: " : "keywords: "}{rule.matchValue}
                 </div>
               </div>
               <IconBtn onClick={() => startEditRule(rule)} color={T.textMuted} size={14} title="Edit">✎</IconBtn>
@@ -657,12 +683,12 @@ function SettingsPanel({ connections, activeConnectionId, onConnectionsChange, o
                   <select value={ruleForm.matchType} onChange={e => setRuleForm(f => ({ ...f, matchType: e.target.value }))}
                     style={{ ...inputStyle, cursor: "pointer" }}>
                     <option value="app">App package name</option>
-                    <option value="keyword">Keyword in text</option>
+                    <option value="keyword">Keyword(s) in text</option>
                   </select>
                 </div>
                 <div style={{ flex: 2 }}>
                   <div style={{ color: T.textSecondary, fontSize: 12, marginBottom: 4, fontWeight: 500 }}>
-                    {ruleForm.matchType === "app" ? "Package name (e.g. com.instagram.android)" : "Keyword"}
+                    {ruleForm.matchType === "app" ? "Package name (e.g. com.instagram.android)" : "Keywords (comma-separated)"}
                   </div>
                   <input style={{ ...inputStyle, fontFamily: ruleForm.matchType === "app" ? "'JetBrains Mono', monospace" : "inherit" }}
                     value={ruleForm.matchValue} onChange={e => setRuleForm(f => ({ ...f, matchValue: e.target.value }))}
@@ -982,7 +1008,7 @@ export default function App() {
   ];
 
   return (
-    <div style={{ minHeight: "100vh", background: T.bg, color: T.textPrimary, fontFamily: "'Inter', -apple-system, sans-serif" }}>
+    <div style={{ minHeight: "100vh", background: T.bg, color: T.textMuted, fontFamily: "'Inter', -apple-system, sans-serif" }}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600;700&display=swap');
         @keyframes slideIn { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: translateY(0); } }
@@ -990,9 +1016,11 @@ export default function App() {
         input, button, select { font-family: inherit; }
         input:focus, select:focus { outline: none; }
         select { appearance: none; }
-        ::-webkit-scrollbar { width: 4px; }
-        ::-webkit-scrollbar-track { background: transparent; }
-        ::-webkit-scrollbar-thumb { background: ${T.border}; border-radius: 2px; }
+        ::-webkit-scrollbar { width: 9px; height: 10px; }
+        ::-webkit-scrollbar-track { background: ${T.elevated}; border-radius: 10px; }
+        ::-webkit-scrollbar-thumb { background: ${T.textSecondary}; border-radius: 10px; border: 2px solid ${T.elevated}; }
+        ::-webkit-scrollbar-thumb:hover { background: ${T.textPrimary}; }
+        * { scrollbar-width: auto; scrollbar-color: ${T.textSecondary} ${T.elevated}; }
       `}</style>
 
       <div style={{
