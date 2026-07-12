@@ -1030,7 +1030,7 @@ export default function App() {
         padding: "0 24px",
       }}>
         <div style={{ display: "flex", alignItems: "center", gap: 14, height: 52, flexWrap: "wrap" }}>
-          <span style={{ fontSize: 15, fontWeight: 800, letterSpacing: "-0.02em", flexShrink: 0 }}>Notify</span>
+          <span style={{ fontSize: 15, fontWeight: 800, letterSpacing: "-0.02em", flexShrink: 0, color: T.textPrimary }}>Notify</span>
 
           <Tag color={statusColor} bg={statusColor + "1A"}>
             <Dot color={statusColor} size={5} />
