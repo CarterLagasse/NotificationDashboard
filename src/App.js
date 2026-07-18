@@ -15,45 +15,53 @@ const JUNK_PREFIXES = [
   "Make sure your device is connected to the Internet.",
 ];
 
+const JUNK_HEADER_KEYWORDS = {
+  // "com.instagram.android": ["liked your", "started following you"],
+  // "com.google.android.gm": ["promo", "sale"],
+};
+
 const JUNK_PACKAGES = [
   "com.android.deskclock",
   "com.sec.android.app.clockpackage",
-  // "com.android.systemui",
-  // "com.android.system",
+  "com.sec.android.app.camera",
+  "com.sec.android.gallery3d",
+  "com.android.systemui",
+  "com.samsung.android.app.smartcapture",
+  "com.android.system",
+  "com.google.android.apps.maps",
 ];
 
 // Apps that are muted by default — notifications from these packages are
 // dropped UNLESS the title or text starts with one of the listed prefixes.
 const APP_ALLOWLIST_FILTERS = {
   // "com.android.dialer":            ["Missed call"],
-  // "com.google.android.dialer":     ["Missed call"],
-  // "com.samsung.android.dialer":    ["Missed call"],
-  // "com.samsung.android.incallui":  ["Missed call"],
 };
 
 const APP_BANNED_PREFIXES = {
   "com.samsung.android.incallui":      ["Call"],
-  "com.android.systemui":              ["Flashlight turned on", "Charging started (", "Charging (", "Edge lighting"],
+  "com.android.systemui":              ["Flashlight turned on", "Charging started (", "Charging (", "Edge lighting", "Charge your phone."],
   "com.google.android.apps.paidtasks": ["Turning on Location History", "Want more surveys? Finish", "New survey available"],
-  "com.sec.android.gallery3d":         ["Screenshot saved", "Refining picture..."],
-  "com.sec.android.app.camera":        ["Screenshot saved", "Refining picture..."],
   "com.microsoft.appmanager":          ["Connecting to your PC", "Your devices are connected"],
   "android":                           ["Private DNS", "An open"],
   "com.google.android.apps.maps":      ["From "],
   "com.sec.android.app.samsungapps":   ["1 update available"],
-
+  "com.samsung.android.forest":        ["Turn down the volume"], // check to make sure this is the right package
+  "com.microsoft.appmanager":          ["Make sure your device is connected"], // check to make sure this is the right package
 };
 
 const APP_COLORS = {
   "com.instagram.android":             "#E1306C",
   "com.google.android.gm":             "#EA4335",
   "com.whatsapp":                      "#25D366",
-  "com.twitter.android":               "#1DA1F2",
   "com.facebook.katana":               "#1877F2",
-  "com.snapchat.android":              "#FFFC00",
   "com.discord":                       "#5865F2",
-  "com.google.android.apps.messaging": "#1A73E8",
-  "com.samsung.android.messaging":     "#1A73E8",
+  "com.textra":                        "#1A73E8",
+};
+
+// Apps that open a specific URL (in a new tab) when their notification card is clicked.
+const APP_CLICK_LINKS = {
+  "com.instagram.android": "https://www.instagram.com/direct/inbox/",
+  "com.google.android.gm": "https://www.gmail.com",
 };
 
 const T = {
@@ -182,6 +190,15 @@ function passesAppBannedPrefixes(n) {
   const title = n.title || "";
   const text = n.text || "";
   return !bannedPrefixes.some(p => title.startsWith(p) || text.startsWith(p));
+}
+
+// Drops notifications whose TITLE (header) contains any junk keyword for that app.
+function passesJunkHeaderKeywords(n) {
+  const keywords = JUNK_HEADER_KEYWORDS[n.packageName];
+  if (!keywords || keywords.length === 0) return true;
+  const title = (n.title || "").toLowerCase();
+  if (!title) return true;
+  return !keywords.some(k => title.includes(k.toLowerCase()));
 }
 
 // ─── Primitive Components ─────────────────────────────────────────────────────
@@ -361,6 +378,7 @@ function NotificationCard({ notification: n, onDelete, onStar, onGroupAssign, gr
   const [showGroupMenu, setShowGroupMenu] = useState(false);
   const menuRef = useRef(null);
   const iconRule = resolveIcon(n, iconRules);
+  const clickLink = APP_CLICK_LINKS[n.packageName];
 
   useEffect(() => {
     if (!showGroupMenu) return;
@@ -370,7 +388,8 @@ function NotificationCard({ notification: n, onDelete, onStar, onGroupAssign, gr
   }, [showGroupMenu]);
 
   const handleCardClick = () => {
-    if (selectMode) onSelect(n.id);
+    if (selectMode) { onSelect(n.id); return; }
+    if (clickLink) window.open(clickLink, "_blank", "noopener,noreferrer");
   };
 
   return (
@@ -382,7 +401,7 @@ function NotificationCard({ notification: n, onDelete, onStar, onGroupAssign, gr
       animation: isNew ? "slideIn 0.25s ease" : "none",
       transition: "border-color 0.15s, background 0.15s",
       display: "flex", gap: 11, alignItems: "flex-start",
-      cursor: selectMode ? "pointer" : "default",
+      cursor: selectMode || clickLink ? "pointer" : "default",
     }}>
       <div style={{ paddingTop: 2, flexShrink: 0 }}>
         <NotifIcon rule={iconRule} color={color} size={30} />
@@ -576,20 +595,22 @@ function SettingsPanel({ connections, activeConnectionId, onConnectionsChange, o
         <SectionLabel>WebSocket Connections</SectionLabel>
         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
           {connections.map(c => (
-            <div key={c.id} style={{
+            <div key={c.id} onClick={() => startEditConn(c)} style={{
               display: "flex", alignItems: "center", gap: 8,
               background: T.elevated, borderRadius: 6, padding: "8px 12px",
               border: `1px solid ${activeConnectionId === c.id ? T.primary : T.border}`,
+              cursor: "pointer",
             }}>
               <input type="radio" checked={activeConnectionId === c.id}
+                onClick={(e) => e.stopPropagation()}
                 onChange={() => onActiveChange(c.id)}
                 style={{ accentColor: T.primary, flexShrink: 0 }} />
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ color: T.textPrimary, fontSize: 13, fontWeight: 600 }}>{c.name}</div>
                 <div style={{ color: T.textSecondary, fontSize: 11, fontFamily: "'JetBrains Mono', monospace", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.url}</div>
               </div>
-              <IconBtn onClick={() => startEditConn(c)} color={T.textMuted} size={14} title="Edit">✎</IconBtn>
-              <IconBtn onClick={() => deleteConn(c.id)} color={T.textMuted} size={16} title="Delete">×</IconBtn>
+              <IconBtn onClick={(e) => { e.stopPropagation(); startEditConn(c); }} color={T.textMuted} size={14} title="Edit">✎</IconBtn>
+              <IconBtn onClick={(e) => { e.stopPropagation(); deleteConn(c.id); }} color={T.textMuted} size={16} title="Delete">×</IconBtn>
             </div>
           ))}
 
@@ -598,7 +619,7 @@ function SettingsPanel({ connections, activeConnectionId, onConnectionsChange, o
           )}
 
           {editingConn !== null && (
-            <div style={formStyle}>
+            <div style={formStyle} onClick={(e) => e.stopPropagation()}>
               <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                 <div>
                   <div style={{ color: T.textSecondary, fontSize: 12, marginBottom: 4, fontWeight: 500 }}>Name</div>
@@ -647,10 +668,11 @@ function SettingsPanel({ connections, activeConnectionId, onConnectionsChange, o
 
         <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 8 }}>
           {iconRules.map(rule => (
-            <div key={rule.id} style={{
+            <div key={rule.id} onClick={() => startEditRule(rule)} style={{
               display: "flex", alignItems: "center", gap: 10,
               background: T.elevated, borderRadius: 6, padding: "8px 12px",
               border: `1px solid ${T.border}`,
+              cursor: "pointer",
             }}>
               <NotifIcon rule={rule} color={T.textMuted} size={28} />
               <div style={{ flex: 1, minWidth: 0 }}>
@@ -659,8 +681,8 @@ function SettingsPanel({ connections, activeConnectionId, onConnectionsChange, o
                   {rule.matchType === "app" ? "app: " : "keywords: "}{rule.matchValue}
                 </div>
               </div>
-              <IconBtn onClick={() => startEditRule(rule)} color={T.textMuted} size={14} title="Edit">✎</IconBtn>
-              <IconBtn onClick={() => deleteRule(rule.id)} color={T.textMuted} size={16} title="Delete">×</IconBtn>
+              <IconBtn onClick={(e) => { e.stopPropagation(); startEditRule(rule); }} color={T.textMuted} size={14} title="Edit">✎</IconBtn>
+              <IconBtn onClick={(e) => { e.stopPropagation(); deleteRule(rule.id); }} color={T.textMuted} size={16} title="Delete">×</IconBtn>
             </div>
           ))}
 
@@ -670,7 +692,7 @@ function SettingsPanel({ connections, activeConnectionId, onConnectionsChange, o
         </div>
 
         {editingRule !== null && (
-          <div style={formStyle}>
+          <div style={formStyle} onClick={(e) => e.stopPropagation()}>
             <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
               <div>
                 <div style={{ color: T.textSecondary, fontSize: 12, marginBottom: 4, fontWeight: 500 }}>Rule name (optional label)</div>
@@ -795,6 +817,8 @@ export default function App() {
   const [activeConnectionId, setActiveConnectionId] = useState(() => load("nd_active_conn", null));
   const [connected, setConnected]   = useState(false);
   const [connecting, setConnecting] = useState(false);
+  const [showConnMenu, setShowConnMenu] = useState(false);
+  const connMenuRef = useRef(null);
   const wsRef = useRef(null);
   const reconnectAttemptRef = useRef(0);
   const reconnectTimerRef = useRef(null);
@@ -822,6 +846,13 @@ export default function App() {
   useEffect(() => { save("nd_active_conn", activeConnectionId); }, [activeConnectionId]);
   useEffect(() => { save("nd_timemode", timeMode); }, [timeMode]);
   useEffect(() => { save("nd_iconrules", iconRules); }, [iconRules]);
+
+  useEffect(() => {
+    if (!showConnMenu) return;
+    const h = (e) => { if (connMenuRef.current && !connMenuRef.current.contains(e.target)) setShowConnMenu(false); };
+    document.addEventListener("mousedown", h);
+    return () => document.removeEventListener("mousedown", h);
+  }, [showConnMenu]);
 
   const activeConnection = connections.find(c => c.id === activeConnectionId) ?? null;
   const DUPLICATE_WINDOW_MS = 2000;
@@ -918,11 +949,19 @@ export default function App() {
         if (JUNK_PACKAGES.includes(raw.packageName)) return;
         if (!passesAppAllowlist(raw)) return;
         if (!passesAppBannedPrefixes(raw)) return;
+        if (!passesJunkHeaderKeywords(raw)) return;
         mergeNotifications([{ ...raw, id: generateId(raw), starred: false, group: null }]);
       } catch (e) { console.warn("Bad payload", e); }
     };
 
     wsRef.current = ws;
+  };
+
+  // Switch the active connection and immediately reconnect to it.
+  const switchConnection = (id) => {
+    setShowConnMenu(false);
+    if (id === activeConnectionId) return;
+    setActiveConnectionId(id);
   };
 
   useEffect(() => {
@@ -938,7 +977,7 @@ export default function App() {
     connect(false);
   }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-}, []);
+}, [activeConnectionId]);
 
   const deleteOne = (id) => {
     const n = notifications.find(x => x.id === id);
@@ -1032,10 +1071,42 @@ export default function App() {
         <div style={{ display: "flex", alignItems: "center", gap: 14, height: 52, flexWrap: "wrap" }}>
           <span style={{ fontSize: 15, fontWeight: 800, letterSpacing: "-0.02em", flexShrink: 0, color: T.textPrimary }}>Notify</span>
 
-          <Tag color={statusColor} bg={statusColor + "1A"}>
-            <Dot color={statusColor} size={5} />
-            {activeConnection ? activeConnection.name : "No connection"}
-          </Tag>
+          <div ref={connMenuRef} style={{ position: "relative" }}>
+            <div onClick={() => setShowConnMenu(v => !v)} style={{ cursor: "pointer" }}>
+              <Tag color={statusColor} bg={statusColor + "1A"}>
+                <Dot color={statusColor} size={5} />
+                {activeConnection ? activeConnection.name : "No connection"}
+              </Tag>
+            </div>
+            {showConnMenu && (
+              <div style={{
+                position: "absolute", left: 0, top: "calc(100% + 6px)",
+                background: T.elevated, border: `1px solid ${T.border}`,
+                borderRadius: 8, padding: 4, zIndex: 200, minWidth: 180,
+                boxShadow: "0 8px 24px rgba(0,0,0,0.5)",
+              }}>
+                {connections.map(c => (
+                  <div key={c.id}
+                    onClick={() => switchConnection(c.id)}
+                    style={{
+                      display: "flex", alignItems: "center", gap: 8,
+                      padding: "7px 10px", cursor: "pointer", fontSize: 13, borderRadius: 5,
+                      color: c.id === activeConnectionId ? T.textPrimary : T.textSecondary,
+                      background: c.id === activeConnectionId ? T.primary : "none",
+                      transition: "background 0.1s",
+                    }}
+                    onMouseEnter={e => { if (c.id !== activeConnectionId) e.currentTarget.style.background = T.border; }}
+                    onMouseLeave={e => { if (c.id !== activeConnectionId) e.currentTarget.style.background = "none"; }}
+                  >
+                    {c.name}
+                  </div>
+                ))}
+                {connections.length === 0 && (
+                  <div style={{ padding: "7px 10px", color: T.textMuted, fontSize: 12 }}>No connections set up</div>
+                )}
+              </div>
+            )}
+          </div>
 
           {connected && stats.batteryPct !== null && (
             <BatteryBar pct={stats.batteryPct} />
