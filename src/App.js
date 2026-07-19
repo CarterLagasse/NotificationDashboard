@@ -15,6 +15,7 @@ const JUNK_PREFIXES = [
   "Make sure your device is connected to the Internet.",
 ];
 
+// Per-app keyword filters for notification TITLES only (not the body).
 const JUNK_HEADER_KEYWORDS = {
   // "com.instagram.android": ["liked your", "started following you"],
   // "com.google.android.gm": ["promo", "sale"],
@@ -29,6 +30,7 @@ const JUNK_PACKAGES = [
   "com.samsung.android.app.smartcapture",
   "com.android.system",
   "com.google.android.apps.maps",
+  "com.microsoft.appmanager",
 ];
 
 // Apps that are muted by default — notifications from these packages are
@@ -41,12 +43,11 @@ const APP_BANNED_PREFIXES = {
   "com.samsung.android.incallui":      ["Call"],
   "com.android.systemui":              ["Flashlight turned on", "Charging started (", "Charging (", "Edge lighting", "Charge your phone."],
   "com.google.android.apps.paidtasks": ["Turning on Location History", "Want more surveys? Finish", "New survey available"],
-  "com.microsoft.appmanager":          ["Connecting to your PC", "Your devices are connected"],
   "android":                           ["Private DNS", "An open"],
   "com.google.android.apps.maps":      ["From "],
   "com.sec.android.app.samsungapps":   ["1 update available"],
   "com.samsung.android.forest":        ["Turn down the volume"], // check to make sure this is the right package
-  "com.microsoft.appmanager":          ["Make sure your device is connected"], // check to make sure this is the right package
+  // com.microsoft.appmanager is fully blocked via JUNK_PACKAGES above, so no prefix rule needed here.
 };
 
 const APP_COLORS = {
@@ -64,16 +65,32 @@ const APP_CLICK_LINKS = {
   "com.google.android.gm": "https://www.gmail.com",
 };
 
+// Side-panel widgets. Uses ESPN's public (unofficial) scoreboard JSON API — no key needed.
+// Add more entries here to show more teams; each renders as its own card.
+const TEAM_WIDGETS = [
+  { sport: "baseball", league: "mlb", abbreviation: "BOS", name: "Red Sox" },
+];
+const TEAM_REFRESH_MS = 60000;
+
+// ─── Design tokens ──────────────────────────────────────────────────────────
+
 const T = {
-  bg:        "#0A0A0F",
-  surface:   "#111118",
-  elevated:  "#1C1C28",
-  border:    "#2A2A3C",
-  primary:   "#5B6AF0",
-  star:      "#FFD166",
-  danger:    "#EF4565",
-  textPrimary:   "#FFFFFF",
-  textSecondary: "#ABABC8",
+  bg:            "#08080D",
+  surface:       "#12121B",
+  surfaceHover:  "#16161F",
+  elevated:      "#1B1B28",
+  elevatedHover: "#232332",
+  border:        "#232333",
+  borderStrong:  "#33334A",
+  primary:       "#6366F1",
+  primaryHover:  "#7476F3",
+  primarySoft:   "#6366F11F",
+  star:          "#FBBF24",
+  danger:        "#F43F5E",
+  dangerSoft:    "#F43F5E1F",
+  success:       "#34D399",
+  textPrimary:   "#F5F5FA",
+  textSecondary: "#9C9CB8",
   textMuted:     "#54546C",
 };
 
@@ -203,8 +220,18 @@ function passesJunkHeaderKeywords(n) {
 
 // ─── Primitive Components ─────────────────────────────────────────────────────
 
-function Dot({ color, size = 8 }) {
-  return <span style={{ width: size, height: size, borderRadius: "50%", background: color, display: "inline-block", flexShrink: 0 }} />;
+function Dot({ color, size = 8, pulse = false }) {
+  return (
+    <span style={{ position: "relative", width: size, height: size, flexShrink: 0, display: "inline-block" }}>
+      {pulse && (
+        <span style={{
+          position: "absolute", inset: 0, borderRadius: "50%", background: color,
+          animation: "pulseRing 1.6s ease-out infinite",
+        }} />
+      )}
+      <span style={{ position: "absolute", inset: 0, borderRadius: "50%", background: color }} />
+    </span>
+  );
 }
 
 function Tag({ children, color = T.textSecondary, bg = T.elevated }) {
@@ -212,7 +239,7 @@ function Tag({ children, color = T.textSecondary, bg = T.elevated }) {
     <span style={{
       display: "inline-flex", alignItems: "center", gap: 5,
       background: bg, color, fontSize: 11, fontWeight: 700,
-      borderRadius: 4, padding: "2px 7px", letterSpacing: "0.04em",
+      borderRadius: 5, padding: "3px 8px", letterSpacing: "0.04em",
       textTransform: "uppercase", fontFamily: "'JetBrains Mono', monospace",
       whiteSpace: "nowrap",
     }}>
@@ -227,10 +254,10 @@ function IconBtn({ onClick, title, children, color = T.textSecondary, size = 18 
     <button onClick={onClick} title={title}
       onMouseEnter={() => setHov(true)} onMouseLeave={() => setHov(false)}
       style={{
-        background: hov ? T.elevated : "none", border: "none", cursor: "pointer",
-        color, fontSize: size, padding: "2px 5px", lineHeight: 1,
+        background: hov ? T.elevatedHover : "none", border: "none", cursor: "pointer",
+        color: hov ? T.textPrimary : color, fontSize: size, padding: "3px 6px", lineHeight: 1,
         display: "flex", alignItems: "center", justifyContent: "center",
-        borderRadius: 4, transition: "background 0.12s",
+        borderRadius: 6, transition: "background 0.12s, color 0.12s",
       }}>
       {children}
     </button>
@@ -238,15 +265,18 @@ function IconBtn({ onClick, title, children, color = T.textSecondary, size = 18 
 }
 
 function Pill({ children, active, onClick }) {
+  const [hov, setHov] = useState(false);
   return (
-    <button onClick={onClick} style={{
-      background: active ? T.primary : T.elevated,
-      color: active ? "#fff" : T.textSecondary,
-      border: `1px solid ${active ? T.primary : T.border}`,
-      borderRadius: 6, padding: "5px 12px", cursor: "pointer",
-      fontSize: 13, fontWeight: active ? 700 : 500,
-      transition: "all 0.15s", whiteSpace: "nowrap",
-    }}>
+    <button onClick={onClick}
+      onMouseEnter={() => setHov(true)} onMouseLeave={() => setHov(false)}
+      style={{
+        background: active ? T.primary : (hov ? T.elevatedHover : T.elevated),
+        color: active ? "#fff" : T.textSecondary,
+        border: `1px solid ${active ? T.primary : T.border}`,
+        borderRadius: 7, padding: "6px 13px", cursor: "pointer",
+        fontSize: 13, fontWeight: active ? 700 : 500,
+        transition: "all 0.15s", whiteSpace: "nowrap",
+      }}>
       {children}
     </button>
   );
@@ -256,14 +286,16 @@ function Toggle({ value, onChange, label }) {
   return (
     <label style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer", userSelect: "none" }}>
       <div onClick={() => onChange(!value)} style={{
-        width: 36, height: 20, borderRadius: 10,
-        background: value ? T.primary : T.border,
-        position: "relative", transition: "background 0.2s", flexShrink: 0,
+        width: 38, height: 22, borderRadius: 11,
+        background: value ? T.primary : T.elevated,
+        border: `1px solid ${value ? T.primary : T.borderStrong}`,
+        position: "relative", transition: "background 0.2s, border-color 0.2s", flexShrink: 0,
       }}>
         <div style={{
-          position: "absolute", top: 3, left: value ? 19 : 3,
-          width: 14, height: 14, borderRadius: "50%",
+          position: "absolute", top: 2, left: value ? 18 : 2,
+          width: 16, height: 16, borderRadius: "50%",
           background: "#fff", transition: "left 0.2s",
+          boxShadow: "0 1px 2px rgba(0,0,0,0.4)",
         }} />
       </div>
       <span style={{ color: T.textSecondary, fontSize: 13, fontWeight: 500 }}>{label}</span>
@@ -272,7 +304,7 @@ function Toggle({ value, onChange, label }) {
 }
 
 function BatteryBar({ pct }) {
-  const color = pct > 50 ? "#34D399" : pct > 20 ? "#FBBF24" : T.danger;
+  const color = pct > 50 ? T.success : pct > 20 ? T.star : T.danger;
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
       <div style={{
@@ -310,7 +342,9 @@ function Card({ children, style = {} }) {
   return (
     <div style={{
       background: T.surface, border: `1px solid ${T.border}`,
-      borderRadius: 8, padding: "14px 16px", ...style,
+      borderRadius: 10, padding: "14px 16px",
+      boxShadow: "0 1px 2px rgba(0,0,0,0.24)",
+      ...style,
     }}>
       {children}
     </div>
@@ -324,11 +358,11 @@ function NotifIcon({ rule, color, size = 32 }) {
     return (
       <div style={{
         width: size, height: size, borderRadius: "50%",
-        background: color + "22", border: `1.5px solid ${color}44`,
+        background: color + "22", border: `1.5px solid ${color}55`,
         display: "flex", alignItems: "center", justifyContent: "center",
         flexShrink: 0,
       }}>
-        <Dot color={color} size={7} />
+        <Dot color={color} size={8} />
       </div>
     );
   }
@@ -341,7 +375,7 @@ function NotifIcon({ rule, color, size = 32 }) {
       <img src={rule.iconData} alt="" style={{
         width: size, height: size, flexShrink: 0,
         objectFit: "cover",
-        borderRadius: isCircle ? "50%" : 0,
+        borderRadius: isCircle ? "50%" : 6,
         border: isCircle ? `1.5px solid ${T.border}` : "none",
       }} />
     );
@@ -376,6 +410,7 @@ function NotifIcon({ rule, color, size = 32 }) {
 function NotificationCard({ notification: n, onDelete, onStar, onGroupAssign, groups, selected, onSelect, selectMode, isNew, timeMode, iconRules }) {
   const color = getAppColor(n.packageName);
   const [showGroupMenu, setShowGroupMenu] = useState(false);
+  const [hov, setHov] = useState(false);
   const menuRef = useRef(null);
   const iconRule = resolveIcon(n, iconRules);
   const clickLink = APP_CLICK_LINKS[n.packageName];
@@ -393,22 +428,25 @@ function NotificationCard({ notification: n, onDelete, onStar, onGroupAssign, gr
   };
 
   return (
-    <div onClick={handleCardClick} style={{
-      background: selected ? "#1A1A2E" : T.surface,
-      border: `1px solid ${selected ? T.primary : T.border}`,
-      borderLeft: `3px solid ${n.starred ? T.star : color}`,
-      borderRadius: 8, padding: "11px 13px", marginBottom: 6,
-      animation: isNew ? "slideIn 0.25s ease" : "none",
-      transition: "border-color 0.15s, background 0.15s",
-      display: "flex", gap: 11, alignItems: "flex-start",
-      cursor: selectMode || clickLink ? "pointer" : "default",
-    }}>
+    <div onClick={handleCardClick}
+      onMouseEnter={() => setHov(true)} onMouseLeave={() => setHov(false)}
+      style={{
+        background: selected ? T.primarySoft : (hov ? T.surfaceHover : T.surface),
+        border: `1px solid ${selected ? T.primary : T.border}`,
+        borderLeft: `3px solid ${n.starred ? T.star : color}`,
+        borderRadius: 10, padding: "12px 14px", marginBottom: 7,
+        animation: isNew ? "slideIn 0.25s ease" : "none",
+        transition: "border-color 0.15s, background 0.15s, box-shadow 0.15s",
+        boxShadow: hov ? "0 2px 8px rgba(0,0,0,0.28)" : "0 1px 2px rgba(0,0,0,0.16)",
+        display: "flex", gap: 12, alignItems: "flex-start",
+        cursor: selectMode || clickLink ? "pointer" : "default",
+      }}>
       <div style={{ paddingTop: 2, flexShrink: 0 }}>
         <NotifIcon rule={iconRule} color={color} size={30} />
       </div>
 
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 5 }}>
           <span style={{
             color: T.textSecondary, fontSize: 11, fontWeight: 700,
             textTransform: "uppercase", letterSpacing: "0.06em",
@@ -420,7 +458,7 @@ function NotificationCard({ notification: n, onDelete, onStar, onGroupAssign, gr
           {n.group && (
             <Tag>{n.group}</Tag>
           )}
-          <span style={{ color: T.textSecondary, fontSize: 11, fontFamily: "'JetBrains Mono', monospace", flexShrink: 0 }}>
+          <span style={{ color: T.textMuted, fontSize: 11, fontFamily: "'JetBrains Mono', monospace", flexShrink: 0 }}>
             {timeMode === "relative" ? timeAgo(n.timestamp) : formatAbsolute(n.timestamp)}
           </span>
 
@@ -437,15 +475,15 @@ function NotificationCard({ notification: n, onDelete, onStar, onGroupAssign, gr
             {showGroupMenu && (
               <div style={{
                 position: "absolute", right: 0, top: "calc(100% + 6px)",
-                background: T.elevated, border: `1px solid ${T.border}`,
-                borderRadius: 8, padding: 4, zIndex: 200, minWidth: 150,
+                background: T.elevated, border: `1px solid ${T.borderStrong}`,
+                borderRadius: 10, padding: 4, zIndex: 200, minWidth: 150,
                 boxShadow: "0 8px 24px rgba(0,0,0,0.5)",
               }}>
                 {[null, ...groups].map(g => (
                   <div key={g ?? "__none__"}
                     onClick={() => { onGroupAssign(n.id, g); setShowGroupMenu(false); }}
                     style={{
-                      padding: "7px 10px", cursor: "pointer", fontSize: 13, borderRadius: 5,
+                      padding: "7px 10px", cursor: "pointer", fontSize: 13, borderRadius: 6,
                       color: n.group === g ? T.textPrimary : T.textSecondary,
                       background: n.group === g ? T.primary : "none",
                       transition: "background 0.1s",
@@ -481,13 +519,109 @@ function NotificationCard({ notification: n, onDelete, onStar, onGroupAssign, gr
   );
 }
 
+// ─── Team Score Card ──────────────────────────────────────────────────────────
+
+function TeamCard({ sport, league, abbreviation, name }) {
+  const [game, setGame]       = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [failed, setFailed]   = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const load = async () => {
+      try {
+        const res = await fetch(`https://site.api.espn.com/apis/site/v2/sports/${sport}/${league}/scoreboard`);
+        const data = await res.json();
+        const events = data.events || [];
+        const match = events.find(ev =>
+          ev.competitions?.[0]?.competitors?.some(c => c.team?.abbreviation === abbreviation)
+        );
+        if (!cancelled) { setGame(match || null); setFailed(false); }
+      } catch {
+        if (!cancelled) setFailed(true);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
+
+    load();
+    const id = setInterval(load, TEAM_REFRESH_MS);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [sport, league, abbreviation]);
+
+  const comp   = game?.competitions?.[0];
+  const away   = comp?.competitors?.find(c => c.homeAway === "away");
+  const home   = comp?.competitors?.find(c => c.homeAway === "home");
+  const status = comp?.status?.type || {};
+  const isLive = status.state === "in";
+  const trackedTeam = [away, home].find(c => c?.team?.abbreviation === abbreviation)?.team;
+  const accent = trackedTeam?.color ? `#${trackedTeam.color}` : T.primary;
+
+  const TeamRow = ({ c }) => {
+    const isTracked = c.team?.abbreviation === abbreviation;
+    return (
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "4px 0" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+          {c.team?.logo && <img src={c.team.logo} alt="" style={{ width: 19, height: 19, flexShrink: 0 }} />}
+          <span style={{
+            fontSize: 13, fontWeight: isTracked ? 700 : 500,
+            color: isTracked ? T.textPrimary : T.textSecondary,
+            overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+          }}>
+            {c.team?.shortDisplayName || c.team?.abbreviation}
+          </span>
+        </div>
+        <span style={{
+          fontSize: 15, fontWeight: 800, fontFamily: "'JetBrains Mono', monospace",
+          color: isTracked ? T.textPrimary : T.textSecondary, flexShrink: 0, marginLeft: 8,
+        }}>
+          {c.score ?? "–"}
+        </span>
+      </div>
+    );
+  };
+
+  let body;
+  if (loading) {
+    body = <div style={{ color: T.textSecondary, fontSize: 13 }}>Loading…</div>;
+  } else if (failed) {
+    body = <div style={{ color: T.textSecondary, fontSize: 13 }}>Couldn't load scores.</div>;
+  } else if (!game) {
+    body = <div style={{ color: T.textSecondary, fontSize: 13 }}>No game today.</div>;
+  } else {
+    body = (
+      <>
+        {away && <TeamRow c={away} />}
+        {home && <TeamRow c={home} />}
+        <div style={{
+          marginTop: 9, paddingTop: 9, borderTop: `1px solid ${T.border}`,
+          display: "flex", alignItems: "center", gap: 6,
+          color: isLive ? T.success : T.textSecondary, fontSize: 11, fontWeight: 700,
+          fontFamily: "'JetBrains Mono', monospace", textTransform: "uppercase", letterSpacing: "0.05em",
+        }}>
+          {isLive && <Dot color={T.success} size={6} pulse />}
+          {status.shortDetail || status.detail || "—"}
+        </div>
+      </>
+    );
+  }
+
+  return (
+    <Card style={{ borderTop: `2px solid ${accent}`, borderTopLeftRadius: 10, borderTopRightRadius: 10 }}>
+      <SectionLabel>{name}</SectionLabel>
+      {body}
+    </Card>
+  );
+}
+
 // ─── Date Divider ─────────────────────────────────────────────────────────────
 
 function DateDivider({ label }) {
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 12, margin: "14px 0 8px" }}>
+    <div style={{ display: "flex", alignItems: "center", gap: 12, margin: "16px 0 9px" }}>
       <div style={{ flex: 1, height: 1, background: T.border }} />
-      <span style={{ color: T.textSecondary, fontSize: 11, fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase", fontFamily: "'JetBrains Mono', monospace" }}>
+      <span style={{ color: T.textMuted, fontSize: 11, fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase", fontFamily: "'JetBrains Mono', monospace" }}>
         {label}
       </span>
       <div style={{ flex: 1, height: 1, background: T.border }} />
@@ -568,24 +702,25 @@ function SettingsPanel({ connections, activeConnectionId, onConnectionsChange, o
 
   const formStyle = {
     background: T.elevated, border: `1px solid ${T.border}`,
-    borderRadius: 8, padding: "14px 16px", marginTop: 10,
+    borderRadius: 10, padding: "14px 16px", marginTop: 10,
   };
 
   const inputStyle = {
     background: T.surface, border: `1px solid ${T.border}`,
-    borderRadius: 6, padding: "7px 10px", color: T.textPrimary,
-    fontSize: 13, width: "100%",
+    borderRadius: 7, padding: "8px 10px", color: T.textPrimary,
+    fontSize: 13, width: "100%", transition: "border-color 0.15s",
   };
 
   const btnPrimary = {
     background: T.primary, color: "#fff", border: "none",
-    borderRadius: 6, padding: "7px 14px", cursor: "pointer", fontSize: 13, fontWeight: 600,
+    borderRadius: 7, padding: "8px 15px", cursor: "pointer", fontSize: 13, fontWeight: 600,
+    boxShadow: "0 1px 2px rgba(0,0,0,0.3)", transition: "background 0.15s",
   };
 
   const btnSecondary = {
     background: T.elevated, color: T.textSecondary,
-    border: `1px solid ${T.border}`, borderRadius: 6,
-    padding: "7px 14px", cursor: "pointer", fontSize: 13, fontWeight: 500,
+    border: `1px solid ${T.border}`, borderRadius: 7,
+    padding: "8px 15px", cursor: "pointer", fontSize: 13, fontWeight: 500,
   };
 
   return (
@@ -593,14 +728,17 @@ function SettingsPanel({ connections, activeConnectionId, onConnectionsChange, o
 
       <Card>
         <SectionLabel>WebSocket Connections</SectionLabel>
-        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
           {connections.map(c => (
             <div key={c.id} onClick={() => startEditConn(c)} style={{
               display: "flex", alignItems: "center", gap: 8,
-              background: T.elevated, borderRadius: 6, padding: "8px 12px",
+              background: T.elevated, borderRadius: 8, padding: "9px 12px",
               border: `1px solid ${activeConnectionId === c.id ? T.primary : T.border}`,
-              cursor: "pointer",
-            }}>
+              cursor: "pointer", transition: "border-color 0.15s, background 0.15s",
+            }}
+            onMouseEnter={e => { if (activeConnectionId !== c.id) e.currentTarget.style.background = T.elevatedHover; }}
+            onMouseLeave={e => { if (activeConnectionId !== c.id) e.currentTarget.style.background = T.elevated; }}
+            >
               <input type="radio" checked={activeConnectionId === c.id}
                 onClick={(e) => e.stopPropagation()}
                 onChange={() => onActiveChange(c.id)}
@@ -640,8 +778,9 @@ function SettingsPanel({ connections, activeConnectionId, onConnectionsChange, o
 
           {editingConn === null && (
             <button onClick={startNewConn} style={{
-              background: "none", color: T.textSecondary, border: `1px dashed ${T.border}`,
-              borderRadius: 6, padding: "7px 14px", cursor: "pointer", fontSize: 13, marginTop: 4, fontWeight: 500,
+              background: "none", color: T.textSecondary, border: `1px dashed ${T.borderStrong}`,
+              borderRadius: 8, padding: "8px 14px", cursor: "pointer", fontSize: 13, marginTop: 4, fontWeight: 500,
+              transition: "color 0.15s, border-color 0.15s",
             }}>
               + Add connection
             </button>
@@ -666,14 +805,17 @@ function SettingsPanel({ connections, activeConnectionId, onConnectionsChange, o
           Images are compressed to 64×64px and stored locally.
         </div>
 
-        <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 8 }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 7, marginBottom: 8 }}>
           {iconRules.map(rule => (
             <div key={rule.id} onClick={() => startEditRule(rule)} style={{
               display: "flex", alignItems: "center", gap: 10,
-              background: T.elevated, borderRadius: 6, padding: "8px 12px",
+              background: T.elevated, borderRadius: 8, padding: "9px 12px",
               border: `1px solid ${T.border}`,
-              cursor: "pointer",
-            }}>
+              cursor: "pointer", transition: "background 0.15s",
+            }}
+            onMouseEnter={e => { e.currentTarget.style.background = T.elevatedHover; }}
+            onMouseLeave={e => { e.currentTarget.style.background = T.elevated; }}
+            >
               <NotifIcon rule={rule} color={T.textMuted} size={28} />
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ color: T.textPrimary, fontSize: 13, fontWeight: 600 }}>{rule.name || rule.matchValue}</div>
@@ -726,7 +868,7 @@ function SettingsPanel({ connections, activeConnectionId, onConnectionsChange, o
                       background: ruleForm.iconType === type ? T.primary : T.surface,
                       color: ruleForm.iconType === type ? "#fff" : T.textSecondary,
                       border: `1px solid ${ruleForm.iconType === type ? T.primary : T.border}`,
-                      borderRadius: 6, padding: "6px 14px", cursor: "pointer", fontSize: 13, textTransform: "capitalize", fontWeight: 500,
+                      borderRadius: 7, padding: "6px 14px", cursor: "pointer", fontSize: 13, textTransform: "capitalize", fontWeight: 500,
                     }}>
                       {type === "emoji" ? "Emoji" : "Upload image"}
                     </button>
@@ -744,7 +886,7 @@ function SettingsPanel({ connections, activeConnectionId, onConnectionsChange, o
                         background: ruleForm.iconShape === opt.value ? T.primary : T.surface,
                         color: ruleForm.iconShape === opt.value ? "#fff" : T.textSecondary,
                         border: `1px solid ${ruleForm.iconShape === opt.value ? T.primary : T.border}`,
-                        borderRadius: 6, padding: "6px 14px", cursor: "pointer", fontSize: 13, fontWeight: 500,
+                        borderRadius: 7, padding: "6px 14px", cursor: "pointer", fontSize: 13, fontWeight: 500,
                       }}>
                         {opt.label}
                       </button>
@@ -778,7 +920,7 @@ function SettingsPanel({ connections, activeConnectionId, onConnectionsChange, o
               </div>
 
               {(ruleForm.iconData || ruleForm.iconType === "emoji") && (
-                <div style={{ display: "flex", alignItems: "center", gap: 8, background: T.surface, borderRadius: 6, padding: "8px 12px" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, background: T.surface, borderRadius: 8, padding: "8px 12px" }}>
                   <NotifIcon rule={{ ...ruleForm, id: "preview" }} color={T.textMuted} size={28} />
                   <span style={{ color: T.textSecondary, fontSize: 12 }}>Preview</span>
                 </div>
@@ -794,8 +936,8 @@ function SettingsPanel({ connections, activeConnectionId, onConnectionsChange, o
 
         {editingRule === null && (
           <button onClick={startNewRule} style={{
-            background: "none", color: T.textSecondary, border: `1px dashed ${T.border}`,
-            borderRadius: 6, padding: "7px 14px", cursor: "pointer", fontSize: 13, fontWeight: 500,
+            background: "none", color: T.textSecondary, border: `1px dashed ${T.borderStrong}`,
+            borderRadius: 8, padding: "8px 14px", cursor: "pointer", fontSize: 13, fontWeight: 500,
           }}>
             + Add icon rule
           </button>
@@ -973,11 +1115,11 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-  if (activeConnection?.url) {
-    connect(false);
-  }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-}, [activeConnectionId]);
+    if (activeConnection?.url) {
+      connect(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeConnectionId]);
 
   const deleteOne = (id) => {
     const n = notifications.find(x => x.id === id);
@@ -1037,7 +1179,7 @@ export default function App() {
     grouped.push({ type: "notification", n });
   }
 
-  const statusColor = connected ? "#34D399" : connecting ? "#FBBF24" : T.danger;
+  const statusColor = connected ? T.success : connecting ? T.star : T.danger;
 
   const TABS = [
     { id: "all",      label: "All",      count: notifications.filter(n => !n.starred && !n.group).length },
@@ -1051,9 +1193,13 @@ export default function App() {
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600;700&display=swap');
         @keyframes slideIn { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: translateY(0); } }
+        @keyframes pulseRing {
+          0%   { transform: scale(1);   opacity: 0.55; }
+          100% { transform: scale(2.6); opacity: 0; }
+        }
         * { box-sizing: border-box; margin: 0; padding: 0; }
         input, button, select { font-family: inherit; }
-        input:focus, select:focus { outline: none; }
+        input:focus, select:focus { outline: none; border-color: ${T.primary} !important; }
         select { appearance: none; }
         ::-webkit-scrollbar { width: 9px; height: 10px; }
         ::-webkit-scrollbar-track { background: ${T.elevated}; border-radius: 10px; }
@@ -1064,25 +1210,37 @@ export default function App() {
 
       <div style={{
         position: "sticky", top: 0, zIndex: 100,
-        background: `${T.bg}EE`, backdropFilter: "blur(12px)",
+        background: `${T.bg}F2`, backdropFilter: "blur(14px)",
         borderBottom: `1px solid ${T.border}`,
         padding: "0 24px",
       }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 14, height: 52, flexWrap: "wrap" }}>
-          <span style={{ fontSize: 15, fontWeight: 800, letterSpacing: "-0.02em", flexShrink: 0, color: T.textPrimary }}>Notify</span>
+        <div style={{ display: "flex", alignItems: "center", gap: 14, height: 56, flexWrap: "wrap" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 9, flexShrink: 0 }}>
+            <div style={{
+              width: 24, height: 24, borderRadius: 7,
+              background: `linear-gradient(135deg, ${T.primary}, #8B5CF6)`,
+              display: "flex", alignItems: "center", justifyContent: "center",
+              fontSize: 13, fontWeight: 800, color: "#fff",
+              boxShadow: `0 2px 8px ${T.primary}55`,
+            }}>
+              N
+            </div>
+            <span style={{ fontSize: 16, fontWeight: 800, letterSpacing: "-0.02em", color: T.textPrimary }}>Notify</span>
+          </div>
 
           <div ref={connMenuRef} style={{ position: "relative" }}>
             <div onClick={() => setShowConnMenu(v => !v)} style={{ cursor: "pointer" }}>
               <Tag color={statusColor} bg={statusColor + "1A"}>
-                <Dot color={statusColor} size={5} />
+                <Dot color={statusColor} size={6} pulse={connected} />
                 {activeConnection ? activeConnection.name : "No connection"}
+                <span style={{ opacity: 0.6, fontSize: 9 }}>▾</span>
               </Tag>
             </div>
             {showConnMenu && (
               <div style={{
                 position: "absolute", left: 0, top: "calc(100% + 6px)",
-                background: T.elevated, border: `1px solid ${T.border}`,
-                borderRadius: 8, padding: 4, zIndex: 200, minWidth: 180,
+                background: T.elevated, border: `1px solid ${T.borderStrong}`,
+                borderRadius: 10, padding: 4, zIndex: 200, minWidth: 180,
                 boxShadow: "0 8px 24px rgba(0,0,0,0.5)",
               }}>
                 {connections.map(c => (
@@ -1090,7 +1248,7 @@ export default function App() {
                     onClick={() => switchConnection(c.id)}
                     style={{
                       display: "flex", alignItems: "center", gap: 8,
-                      padding: "7px 10px", cursor: "pointer", fontSize: 13, borderRadius: 5,
+                      padding: "8px 10px", cursor: "pointer", fontSize: 13, borderRadius: 7,
                       color: c.id === activeConnectionId ? T.textPrimary : T.textSecondary,
                       background: c.id === activeConnectionId ? T.primary : "none",
                       transition: "background 0.1s",
@@ -1102,7 +1260,7 @@ export default function App() {
                   </div>
                 ))}
                 {connections.length === 0 && (
-                  <div style={{ padding: "7px 10px", color: T.textMuted, fontSize: 12 }}>No connections set up</div>
+                  <div style={{ padding: "8px 10px", color: T.textMuted, fontSize: 12 }}>No connections set up</div>
                 )}
               </div>
             )}
@@ -1124,14 +1282,16 @@ export default function App() {
             background: connected ? T.elevated : T.primary,
             color: connected ? T.textSecondary : "#fff",
             border: `1px solid ${connected ? T.border : T.primary}`,
-            borderRadius: 6, padding: "6px 16px", cursor: activeConnection ? "pointer" : "default",
+            borderRadius: 7, padding: "7px 17px", cursor: activeConnection ? "pointer" : "default",
             fontSize: 13, fontWeight: 700, whiteSpace: "nowrap", opacity: activeConnection ? 1 : 0.4,
+            boxShadow: connected ? "none" : `0 2px 8px ${T.primary}44`,
+            transition: "background 0.15s, box-shadow 0.15s",
           }}>
             {connecting ? "Connecting…" : connected ? "Reconnect" : "Connect"}
           </button>
         </div>
 
-        <div style={{ display: "flex", gap: 0, borderTop: `1px solid ${T.border}` }}>
+        <div style={{ display: "flex", gap: 2, borderTop: `1px solid ${T.border}` }}>
           {TABS.map(tab => (
             <button key={tab.id}
               onClick={() => { setActiveTab(tab.id); setGroupFilter(null); }}
@@ -1139,7 +1299,7 @@ export default function App() {
                 background: "none", border: "none", cursor: "pointer",
                 color: activeTab === tab.id ? T.textPrimary : T.textSecondary,
                 fontSize: 13, fontWeight: activeTab === tab.id ? 700 : 500,
-                padding: "9px 16px",
+                padding: "10px 16px",
                 borderBottom: `2px solid ${activeTab === tab.id ? T.primary : "transparent"}`,
                 transition: "all 0.15s", display: "flex", alignItems: "center", gap: 6,
               }}>
@@ -1159,7 +1319,8 @@ export default function App() {
         </div>
       </div>
 
-      <div style={{ padding: "16px 24px", maxWidth: 900, margin: "0 auto" }}>
+      <div style={{ padding: "18px 24px", maxWidth: 1180, margin: "0 auto", display: "flex", gap: 20, alignItems: "flex-start" }}>
+      <div style={{ flex: 1, minWidth: 0, maxWidth: 900 }}>
 
         {activeTab === "settings" ? (
           <SettingsPanel
@@ -1193,13 +1354,13 @@ export default function App() {
                         onChange={e => setNewGroupName(e.target.value)}
                         onKeyDown={e => { if (e.key === "Enter") addGroup(); if (e.key === "Escape") setShowGroupInput(false); }}
                         placeholder="Group name"
-                        style={{ background: T.elevated, border: `1px solid ${T.primary}`, borderRadius: 6, padding: "5px 10px", color: T.textPrimary, fontSize: 13, width: 130 }}
+                        style={{ background: T.elevated, border: `1px solid ${T.primary}`, borderRadius: 7, padding: "6px 10px", color: T.textPrimary, fontSize: 13, width: 130 }}
                       />
-                      <button onClick={addGroup} style={{ background: T.primary, color: "#fff", border: "none", borderRadius: 6, padding: "5px 12px", cursor: "pointer", fontSize: 13, fontWeight: 600 }}>Add</button>
-                      <button onClick={() => setShowGroupInput(false)} style={{ background: T.elevated, color: T.textSecondary, border: `1px solid ${T.border}`, borderRadius: 6, padding: "5px 10px", cursor: "pointer", fontSize: 13 }}>Cancel</button>
+                      <button onClick={addGroup} style={{ background: T.primary, color: "#fff", border: "none", borderRadius: 7, padding: "6px 13px", cursor: "pointer", fontSize: 13, fontWeight: 600 }}>Add</button>
+                      <button onClick={() => setShowGroupInput(false)} style={{ background: T.elevated, color: T.textSecondary, border: `1px solid ${T.border}`, borderRadius: 7, padding: "6px 10px", cursor: "pointer", fontSize: 13 }}>Cancel</button>
                     </div>
                   ) : (
-                    <button onClick={() => setShowGroupInput(true)} style={{ background: "none", color: T.textSecondary, border: `1px dashed ${T.border}`, borderRadius: 6, padding: "5px 12px", cursor: "pointer", fontSize: 13, fontWeight: 500 }}>
+                    <button onClick={() => setShowGroupInput(true)} style={{ background: "none", color: T.textSecondary, border: `1px dashed ${T.borderStrong}`, borderRadius: 7, padding: "6px 13px", cursor: "pointer", fontSize: 13, fontWeight: 500 }}>
                       + New group
                     </button>
                   )}
@@ -1209,16 +1370,17 @@ export default function App() {
 
             <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
               <div style={{ position: "relative", flex: 1 }}>
-                <span style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: T.textSecondary, fontSize: 14, pointerEvents: "none" }}>⌕</span>
+                <span style={{ position: "absolute", left: 11, top: "50%", transform: "translateY(-50%)", color: T.textSecondary, fontSize: 14, pointerEvents: "none" }}>⌕</span>
                 <input placeholder="Search notifications…" value={search} onChange={e => setSearch(e.target.value)}
-                  style={{ width: "100%", background: T.surface, border: `1px solid ${T.border}`, borderRadius: 6, padding: "8px 12px 8px 30px", color: T.textPrimary, fontSize: 13 }}
+                  style={{ width: "100%", background: T.surface, border: `1px solid ${T.border}`, borderRadius: 8, padding: "9px 12px 9px 32px", color: T.textPrimary, fontSize: 13, transition: "border-color 0.15s" }}
                 />
               </div>
               <button onClick={() => { setSelectMode(v => !v); setSelected(new Set()); }} style={{
                 background: selectMode ? T.primary : T.surface,
                 color: selectMode ? "#fff" : T.textSecondary,
                 border: `1px solid ${selectMode ? T.primary : T.border}`,
-                borderRadius: 6, padding: "8px 14px", cursor: "pointer", fontSize: 13, fontWeight: 600,
+                borderRadius: 8, padding: "9px 15px", cursor: "pointer", fontSize: 13, fontWeight: 600,
+                transition: "all 0.15s",
               }}>
                 {selectMode ? "Cancel" : "Select"}
               </button>
@@ -1233,12 +1395,12 @@ export default function App() {
             )}
 
             {selectMode && (
-              <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 6, padding: "8px 12px", marginBottom: 10, display: "flex", alignItems: "center", gap: 8 }}>
+              <div style={{ background: T.surface, border: `1px solid ${T.border}`, borderRadius: 8, padding: "9px 12px", marginBottom: 10, display: "flex", alignItems: "center", gap: 8 }}>
                 <span style={{ color: T.textSecondary, fontSize: 13, flex: 1, fontWeight: 500 }}>{selected.size} selected</span>
-                <button onClick={() => setSelected(new Set(filtered.map(n => n.id)))} style={{ background: T.elevated, color: T.textSecondary, border: `1px solid ${T.border}`, borderRadius: 6, padding: "5px 12px", cursor: "pointer", fontSize: 13, fontWeight: 500 }}>
+                <button onClick={() => setSelected(new Set(filtered.map(n => n.id)))} style={{ background: T.elevated, color: T.textSecondary, border: `1px solid ${T.border}`, borderRadius: 7, padding: "6px 13px", cursor: "pointer", fontSize: 13, fontWeight: 500 }}>
                   Select all
                 </button>
-                <button onClick={deleteSelected} disabled={selected.size === 0} style={{ background: selected.size > 0 ? T.danger : T.elevated, color: "#fff", border: "none", borderRadius: 6, padding: "5px 12px", cursor: selected.size > 0 ? "pointer" : "default", fontSize: 13, fontWeight: 600 }}>
+                <button onClick={deleteSelected} disabled={selected.size === 0} style={{ background: selected.size > 0 ? T.danger : T.elevated, color: "#fff", border: "none", borderRadius: 7, padding: "6px 13px", cursor: selected.size > 0 ? "pointer" : "default", fontSize: 13, fontWeight: 600 }}>
                   Delete {selected.size > 0 ? `(${selected.size})` : ""}
                 </button>
               </div>
@@ -1246,7 +1408,11 @@ export default function App() {
 
             {grouped.length === 0 ? (
               <div style={{ textAlign: "center", color: T.textSecondary, marginTop: 80 }}>
-                <div style={{ fontSize: 32, marginBottom: 14, opacity: 0.35 }}>
+                <div style={{
+                  width: 56, height: 56, borderRadius: "50%", background: T.elevated,
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  fontSize: 24, margin: "0 auto 16px", color: T.textMuted,
+                }}>
                   {activeTab === "starred" ? "★" : activeTab === "groups" ? "⊞" : "○"}
                 </div>
                 <div style={{ fontSize: 15, fontWeight: 700, color: T.textPrimary, marginBottom: 8 }}>
@@ -1283,6 +1449,15 @@ export default function App() {
             )}
           </>
         )}
+      </div>
+
+      {activeTab !== "settings" && TEAM_WIDGETS.length > 0 && (
+        <div style={{ width: 240, flexShrink: 0, display: "flex", flexDirection: "column", gap: 14, position: "sticky", top: 82 }}>
+          {TEAM_WIDGETS.map(w => (
+            <TeamCard key={`${w.league}-${w.abbreviation}`} sport={w.sport} league={w.league} abbreviation={w.abbreviation} name={w.name} />
+          ))}
+        </div>
+      )}
       </div>
     </div>
   );
