@@ -1,951 +1,18 @@
 import { useState, useEffect, useRef } from "react";
-
-//If the restart fails:
-//pm2 start C:\notif-server\server.js --name notification-dashboard
-//Pm2 save
-
-//For updating code:
-//npm run build
-//pm2 restart notification-dashboard
-
-
-// ─── Constants ────────────────────────────────────────────────────────────────
-
-const JUNK_PREFIXES = [
-  "Make sure your device is connected to the Internet.",
-];
-
-// Per-app keyword filters for notification TITLES only (not the body).
-const JUNK_HEADER_KEYWORDS = {
-  // "com.instagram.android": ["liked your", "started following you"],
-  // "com.google.android.gm": ["promo", "sale"],
-};
-
-const JUNK_PACKAGES = [
-  "com.android.deskclock",
-  "com.sec.android.app.clockpackage",
-  "com.sec.android.app.camera",
-  "com.sec.android.gallery3d",
-  "com.android.systemui",
-  "com.samsung.android.app.smartcapture",
-  "com.android.system",
-  "com.google.android.apps.maps",
-  "com.microsoft.appmanager",
-];
-
-// Apps that are muted by default — notifications from these packages are
-// dropped UNLESS the title or text starts with one of the listed prefixes.
-const APP_ALLOWLIST_FILTERS = {
-  // "com.android.dialer":            ["Missed call"],
-};
-
-const APP_BANNED_PREFIXES = {
-  "com.samsung.android.incallui":      ["Call"],
-  "com.android.systemui":              ["Flashlight turned on", "Charging started (", "Charging (", "Edge lighting", "Charge your phone."],
-  "com.google.android.apps.paidtasks": ["Turning on Location History", "Want more surveys? Finish", "New survey available"],
-  "android":                           ["Private DNS", "An open"],
-  "com.google.android.apps.maps":      ["From "],
-  "com.sec.android.app.samsungapps":   ["1 update available"],
-  "com.samsung.android.forest":        ["Turn down the volume"], // check to make sure this is the right package
-  // com.microsoft.appmanager is fully blocked via JUNK_PACKAGES above, so no prefix rule needed here.
-};
-
-const APP_COLORS = {
-  "com.instagram.android":             "#E1306C",
-  "com.google.android.gm":             "#EA4335",
-  "com.whatsapp":                      "#25D366",
-  "com.facebook.katana":               "#1877F2",
-  "com.discord":                       "#5865F2",
-  "com.textra":                        "#1A73E8",
-};
-
-// Apps that open a specific URL (in a new tab) when their notification card is clicked.
-const APP_CLICK_LINKS = {
-  "com.instagram.android": "https://www.instagram.com/direct/inbox/",
-  "com.google.android.gm": "https://www.gmail.com",
-};
-
-// Side-panel widgets. Uses ESPN's public (unofficial) scoreboard JSON API — no key needed.
-// Add more entries here to show more teams; each renders as its own card.
-const TEAM_WIDGETS = [
-  { sport: "baseball", league: "mlb", abbreviation: "BOS", name: "Red Sox" },
-];
-const TEAM_REFRESH_MS = 60000;
-
-// ─── Design tokens ──────────────────────────────────────────────────────────
-
-const T = {
-  bg:            "#08080D",
-  surface:       "#12121B",
-  surfaceHover:  "#16161F",
-  elevated:      "#1B1B28",
-  elevatedHover: "#232332",
-  border:        "#232333",
-  borderStrong:  "#33334A",
-  primary:       "#6366F1",
-  primaryHover:  "#7476F3",
-  primarySoft:   "#6366F11F",
-  star:          "#FBBF24",
-  danger:        "#F43F5E",
-  dangerSoft:    "#F43F5E1F",
-  success:       "#34D399",
-  textPrimary:   "#F5F5FA",
-  textSecondary: "#9C9CB8",
-  textMuted:     "#54546C",
-};
+import { T } from "./theme";
+import { load, save, generateId, formatDate, formatDuration } from "./utils";
+import {
+  JUNK_PREFIXES, JUNK_PACKAGES,
+  passesAppAllowlist, passesAppBannedExact, passesAppBannedPrefixes, passesJunkHeaderKeywords,
+} from "./filters";
+import { Dot, Tag, IconBtn, Pill, BatteryBar, StatSkeleton, Card } from "./components/Primitives";
+import { NotificationCard, DateDivider } from "./components/Notifications";
+import { DEFAULT_TEAM_WIDGETS, normalizeWidgets, WidgetGrid } from "./components/Widgets";
+import SettingsPanel from "./components/Settingspanel";
 
 const MAX_BACKOFF_ATTEMPTS = 6;
 const BASE_DELAY_MS = 2000;
 const SLOW_RETRY_MS = 60000;
-
-// ─── Utilities ────────────────────────────────────────────────────────────────
-
-function timeAgo(ts) {
-  const s = Math.floor((Date.now() - ts) / 1000);
-  if (s < 60)    return `${s}s ago`;
-  if (s < 3600)  return `${Math.floor(s / 60)}m ago`;
-  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
-  return `${Math.floor(s / 86400)}d ago`;
-}
-
-function formatAbsolute(ts) {
-  const d = new Date(ts);
-  return d.toLocaleDateString([], { month: "short", day: "numeric" }) +
-    " " + d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-}
-
-function formatDate(ts) {
-  const d = new Date(ts);
-  const today = new Date();
-  if (d.toDateString() === today.toDateString()) return "Today";
-  const yesterday = new Date(today);
-  yesterday.setDate(today.getDate() - 1);
-  if (d.toDateString() === yesterday.toDateString()) return "Yesterday";
-  return d.toLocaleDateString([], { month: "short", day: "numeric" });
-}
-
-function formatDuration(ms) {
-  if (ms == null || ms < 0) return "—";
-  const totalMin = Math.floor(ms / 60000);
-  const h = Math.floor(totalMin / 60);
-  const m = totalMin % 60;
-  return h > 0 ? `${h}h ${m}m` : `${m}m`;
-}
-
-function generateId(n) {
-  return `${n.packageName}-${n.timestamp}-${(n.title || "").slice(0, 10)}`;
-}
-
-function getAppColor(packageName) {
-  return APP_COLORS[packageName] || T.textMuted;
-}
-
-function load(key, fallback) {
-  try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : fallback; }
-  catch { return fallback; }
-}
-
-function save(key, value) {
-  try { localStorage.setItem(key, JSON.stringify(value)); } catch {}
-}
-
-function compressImage(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const img = new Image();
-      img.onload = () => {
-        const canvas = document.createElement("canvas");
-        const MAX = 64;
-        const scale = Math.min(MAX / img.width, MAX / img.height, 1);
-        canvas.width  = Math.round(img.width  * scale);
-        canvas.height = Math.round(img.height * scale);
-        canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
-        resolve(canvas.toDataURL("image/png", 0.85));
-      };
-      img.onerror = reject;
-      img.src = e.target.result;
-    };
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
-  });
-}
-
-// Splits a comma-separated keyword string into a clean list of lowercase keywords.
-function parseKeywords(raw) {
-  return (raw || "")
-    .split(",")
-    .map(k => k.trim().toLowerCase())
-    .filter(Boolean);
-}
-
-function resolveIcon(n, iconRules) {
-  for (const rule of iconRules) {
-    if (rule.matchType === "app" && rule.matchValue === n.packageName) return rule;
-  }
-  const text = `${n.appName} ${n.title || ""} ${n.text || ""}`.toLowerCase();
-  for (const rule of iconRules) {
-    if (rule.matchType === "keyword") {
-      const keywords = parseKeywords(rule.matchValue);
-      if (keywords.some(k => text.includes(k))) return rule;
-    }
-  }
-  return null;
-}
-
-function passesAppAllowlist(n) {
-  const allowedPrefixes = APP_ALLOWLIST_FILTERS[n.packageName];
-  if (!allowedPrefixes || allowedPrefixes.length === 0) return true; // no restriction for this app
-  const title = n.title || "";
-  const text = n.text || "";
-  return allowedPrefixes.some(p => title.startsWith(p) || text.startsWith(p));
-}
-
-function passesAppBannedPrefixes(n) {
-  const bannedPrefixes = APP_BANNED_PREFIXES[n.packageName];
-  if (!bannedPrefixes || bannedPrefixes.length === 0) return true; // no bans for this app
-  const title = n.title || "";
-  const text = n.text || "";
-  return !bannedPrefixes.some(p => title.startsWith(p) || text.startsWith(p));
-}
-
-// Drops notifications whose TITLE (header) contains any junk keyword for that app.
-function passesJunkHeaderKeywords(n) {
-  const keywords = JUNK_HEADER_KEYWORDS[n.packageName];
-  if (!keywords || keywords.length === 0) return true;
-  const title = (n.title || "").toLowerCase();
-  if (!title) return true;
-  return !keywords.some(k => title.includes(k.toLowerCase()));
-}
-
-// ─── Primitive Components ─────────────────────────────────────────────────────
-
-function Dot({ color, size = 8, pulse = false }) {
-  return (
-    <span style={{ position: "relative", width: size, height: size, flexShrink: 0, display: "inline-block" }}>
-      {pulse && (
-        <span style={{
-          position: "absolute", inset: 0, borderRadius: "50%", background: color,
-          animation: "pulseRing 1.6s ease-out infinite",
-        }} />
-      )}
-      <span style={{ position: "absolute", inset: 0, borderRadius: "50%", background: color }} />
-    </span>
-  );
-}
-
-function Tag({ children, color = T.textSecondary, bg = T.elevated }) {
-  return (
-    <span style={{
-      display: "inline-flex", alignItems: "center", gap: 5,
-      background: bg, color, fontSize: 11, fontWeight: 700,
-      borderRadius: 5, padding: "3px 8px", letterSpacing: "0.04em",
-      textTransform: "uppercase", fontFamily: "'JetBrains Mono', monospace",
-      whiteSpace: "nowrap",
-    }}>
-      {children}
-    </span>
-  );
-}
-
-function IconBtn({ onClick, title, children, color = T.textSecondary, size = 18 }) {
-  const [hov, setHov] = useState(false);
-  return (
-    <button onClick={onClick} title={title}
-      onMouseEnter={() => setHov(true)} onMouseLeave={() => setHov(false)}
-      style={{
-        background: hov ? T.elevatedHover : "none", border: "none", cursor: "pointer",
-        color: hov ? T.textPrimary : color, fontSize: size, padding: "3px 6px", lineHeight: 1,
-        display: "flex", alignItems: "center", justifyContent: "center",
-        borderRadius: 6, transition: "background 0.12s, color 0.12s",
-      }}>
-      {children}
-    </button>
-  );
-}
-
-function Pill({ children, active, onClick }) {
-  const [hov, setHov] = useState(false);
-  return (
-    <button onClick={onClick}
-      onMouseEnter={() => setHov(true)} onMouseLeave={() => setHov(false)}
-      style={{
-        background: active ? T.primary : (hov ? T.elevatedHover : T.elevated),
-        color: active ? "#fff" : T.textSecondary,
-        border: `1px solid ${active ? T.primary : T.border}`,
-        borderRadius: 7, padding: "6px 13px", cursor: "pointer",
-        fontSize: 13, fontWeight: active ? 700 : 500,
-        transition: "all 0.15s", whiteSpace: "nowrap",
-      }}>
-      {children}
-    </button>
-  );
-}
-
-function Toggle({ value, onChange, label }) {
-  return (
-    <label style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer", userSelect: "none" }}>
-      <div onClick={() => onChange(!value)} style={{
-        width: 38, height: 22, borderRadius: 11,
-        background: value ? T.primary : T.elevated,
-        border: `1px solid ${value ? T.primary : T.borderStrong}`,
-        position: "relative", transition: "background 0.2s, border-color 0.2s", flexShrink: 0,
-      }}>
-        <div style={{
-          position: "absolute", top: 2, left: value ? 18 : 2,
-          width: 16, height: 16, borderRadius: "50%",
-          background: "#fff", transition: "left 0.2s",
-          boxShadow: "0 1px 2px rgba(0,0,0,0.4)",
-        }} />
-      </div>
-      <span style={{ color: T.textSecondary, fontSize: 13, fontWeight: 500 }}>{label}</span>
-    </label>
-  );
-}
-
-function BatteryBar({ pct }) {
-  const color = pct > 50 ? T.success : pct > 20 ? T.star : T.danger;
-  return (
-    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-      <div style={{
-        width: 36, height: 12, borderRadius: 3,
-        border: `1px solid ${T.border}`, background: T.elevated,
-        position: "relative", overflow: "hidden", flexShrink: 0,
-      }}>
-        <div style={{
-          position: "absolute", top: 0, left: 0, bottom: 0,
-          width: `${Math.max(0, Math.min(100, pct))}%`,
-          background: color, transition: "width 0.3s, background 0.3s",
-        }} />
-      </div>
-      <span style={{ color: T.textSecondary, fontSize: 11, fontWeight: 700, fontFamily: "'JetBrains Mono', monospace" }}>
-        {pct}%
-      </span>
-    </div>
-  );
-}
-
-function SectionLabel({ children }) {
-  return (
-    <div style={{
-      color: T.textSecondary, fontSize: 11, fontWeight: 700,
-      textTransform: "uppercase", letterSpacing: "0.08em",
-      fontFamily: "'JetBrains Mono', monospace",
-      marginBottom: 10,
-    }}>
-      {children}
-    </div>
-  );
-}
-
-function Card({ children, style = {} }) {
-  return (
-    <div style={{
-      background: T.surface, border: `1px solid ${T.border}`,
-      borderRadius: 10, padding: "14px 16px",
-      boxShadow: "0 1px 2px rgba(0,0,0,0.24)",
-      ...style,
-    }}>
-      {children}
-    </div>
-  );
-}
-
-// ─── Notification Icon ────────────────────────────────────────────────────────
-
-function NotifIcon({ rule, color, size = 32 }) {
-  if (!rule) {
-    return (
-      <div style={{
-        width: size, height: size, borderRadius: "50%",
-        background: color + "22", border: `1.5px solid ${color}55`,
-        display: "flex", alignItems: "center", justifyContent: "center",
-        flexShrink: 0,
-      }}>
-        <Dot color={color} size={8} />
-      </div>
-    );
-  }
-
-  const shape = rule.iconShape ?? "circle";
-  const isCircle = shape === "circle";
-
-  if (rule.iconType === "image" && rule.iconData) {
-    return (
-      <img src={rule.iconData} alt="" style={{
-        width: size, height: size, flexShrink: 0,
-        objectFit: "cover",
-        borderRadius: isCircle ? "50%" : 6,
-        border: isCircle ? `1.5px solid ${T.border}` : "none",
-      }} />
-    );
-  }
-
-  if (isCircle) {
-    return (
-      <div style={{
-        width: size, height: size, borderRadius: "50%",
-        background: T.elevated, border: `1.5px solid ${T.border}`,
-        display: "flex", alignItems: "center", justifyContent: "center",
-        fontSize: size * 0.5, flexShrink: 0,
-      }}>
-        {rule.iconData || "📌"}
-      </div>
-    );
-  }
-
-  return (
-    <div style={{
-      width: size, height: size,
-      display: "flex", alignItems: "center", justifyContent: "center",
-      fontSize: size * 0.65, flexShrink: 0,
-    }}>
-      {rule.iconData || "📌"}
-    </div>
-  );
-}
-
-// ─── Notification Card ────────────────────────────────────────────────────────
-
-function NotificationCard({ notification: n, onDelete, onStar, onGroupAssign, groups, selected, onSelect, selectMode, isNew, timeMode, iconRules }) {
-  const color = getAppColor(n.packageName);
-  const [showGroupMenu, setShowGroupMenu] = useState(false);
-  const [hov, setHov] = useState(false);
-  const menuRef = useRef(null);
-  const iconRule = resolveIcon(n, iconRules);
-  const clickLink = APP_CLICK_LINKS[n.packageName];
-
-  useEffect(() => {
-    if (!showGroupMenu) return;
-    const h = (e) => { if (menuRef.current && !menuRef.current.contains(e.target)) setShowGroupMenu(false); };
-    document.addEventListener("mousedown", h);
-    return () => document.removeEventListener("mousedown", h);
-  }, [showGroupMenu]);
-
-  const handleCardClick = () => {
-    if (selectMode) { onSelect(n.id); return; }
-    if (clickLink) window.open(clickLink, "_blank", "noopener,noreferrer");
-  };
-
-  return (
-    <div onClick={handleCardClick}
-      onMouseEnter={() => setHov(true)} onMouseLeave={() => setHov(false)}
-      style={{
-        background: selected ? T.primarySoft : (hov ? T.surfaceHover : T.surface),
-        border: `1px solid ${selected ? T.primary : T.border}`,
-        borderLeft: `3px solid ${n.starred ? T.star : color}`,
-        borderRadius: 10, padding: "12px 14px", marginBottom: 7,
-        animation: isNew ? "slideIn 0.25s ease" : "none",
-        transition: "border-color 0.15s, background 0.15s, box-shadow 0.15s",
-        boxShadow: hov ? "0 2px 8px rgba(0,0,0,0.28)" : "0 1px 2px rgba(0,0,0,0.16)",
-        display: "flex", gap: 12, alignItems: "flex-start",
-        cursor: selectMode || clickLink ? "pointer" : "default",
-      }}>
-      <div style={{ paddingTop: 2, flexShrink: 0 }}>
-        <NotifIcon rule={iconRule} color={color} size={30} />
-      </div>
-
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 5 }}>
-          <span style={{
-            color: T.textSecondary, fontSize: 11, fontWeight: 700,
-            textTransform: "uppercase", letterSpacing: "0.06em",
-            fontFamily: "'JetBrains Mono', monospace",
-            overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1,
-          }}>
-            {n.appName}
-          </span>
-          {n.group && (
-            <Tag>{n.group}</Tag>
-          )}
-          <span style={{ color: T.textMuted, fontSize: 11, fontFamily: "'JetBrains Mono', monospace", flexShrink: 0 }}>
-            {timeMode === "relative" ? timeAgo(n.timestamp) : formatAbsolute(n.timestamp)}
-          </span>
-
-          <IconBtn onClick={(e) => { e.stopPropagation(); onStar(n.id); }} title={n.starred ? "Unstar" : "Star"}
-            color={n.starred ? T.star : T.textMuted} size={17}>
-            {n.starred ? "★" : "☆"}
-          </IconBtn>
-
-          <div ref={menuRef} onClick={(e) => e.stopPropagation()} style={{ position: "relative" }}>
-            <IconBtn onClick={() => setShowGroupMenu(v => !v)} title="Assign group"
-              color={n.group ? T.primary : T.textMuted} size={15}>
-              ⊞
-            </IconBtn>
-            {showGroupMenu && (
-              <div style={{
-                position: "absolute", right: 0, top: "calc(100% + 6px)",
-                background: T.elevated, border: `1px solid ${T.borderStrong}`,
-                borderRadius: 10, padding: 4, zIndex: 200, minWidth: 150,
-                boxShadow: "0 8px 24px rgba(0,0,0,0.5)",
-              }}>
-                {[null, ...groups].map(g => (
-                  <div key={g ?? "__none__"}
-                    onClick={() => { onGroupAssign(n.id, g); setShowGroupMenu(false); }}
-                    style={{
-                      padding: "7px 10px", cursor: "pointer", fontSize: 13, borderRadius: 6,
-                      color: n.group === g ? T.textPrimary : T.textSecondary,
-                      background: n.group === g ? T.primary : "none",
-                      transition: "background 0.1s",
-                    }}
-                    onMouseEnter={e => { if (n.group !== g) e.currentTarget.style.background = T.border; }}
-                    onMouseLeave={e => { if (n.group !== g) e.currentTarget.style.background = "none"; }}
-                  >
-                    {g ?? "No group"}
-                  </div>
-                ))}
-                {groups.length === 0 && (
-                  <div style={{ padding: "7px 10px", color: T.textMuted, fontSize: 12 }}>No groups yet</div>
-                )}
-              </div>
-            )}
-          </div>
-
-          <IconBtn onClick={(e) => { e.stopPropagation(); onDelete(n.id); }} title="Delete" color={T.textMuted} size={20}>×</IconBtn>
-        </div>
-
-        {n.title && (
-          <div style={{ color: T.textPrimary, fontWeight: 700, fontSize: 14.5, marginBottom: 3, lineHeight: 1.4 }}>
-            {n.title}
-          </div>
-        )}
-        {n.text && (
-          <div style={{ color: T.textSecondary, fontSize: 13, lineHeight: 1.5, fontWeight: 500 }}>
-            {n.text}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-// ─── Team Score Card ──────────────────────────────────────────────────────────
-
-function TeamCard({ sport, league, abbreviation, name }) {
-  const [game, setGame]       = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [failed, setFailed]   = useState(false);
-
-  useEffect(() => {
-    let cancelled = false;
-
-    const load = async () => {
-      try {
-        const res = await fetch(`https://site.api.espn.com/apis/site/v2/sports/${sport}/${league}/scoreboard`);
-        const data = await res.json();
-        const events = data.events || [];
-        const match = events.find(ev =>
-          ev.competitions?.[0]?.competitors?.some(c => c.team?.abbreviation === abbreviation)
-        );
-        if (!cancelled) { setGame(match || null); setFailed(false); }
-      } catch {
-        if (!cancelled) setFailed(true);
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    };
-
-    load();
-    const id = setInterval(load, TEAM_REFRESH_MS);
-    return () => { cancelled = true; clearInterval(id); };
-  }, [sport, league, abbreviation]);
-
-  const comp   = game?.competitions?.[0];
-  const away   = comp?.competitors?.find(c => c.homeAway === "away");
-  const home   = comp?.competitors?.find(c => c.homeAway === "home");
-  const status = comp?.status?.type || {};
-  const isLive = status.state === "in";
-  const trackedTeam = [away, home].find(c => c?.team?.abbreviation === abbreviation)?.team;
-  const accent = trackedTeam?.color ? `#${trackedTeam.color}` : T.primary;
-
-  const TeamRow = ({ c }) => {
-    const isTracked = c.team?.abbreviation === abbreviation;
-    return (
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "4px 0" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
-          {c.team?.logo && <img src={c.team.logo} alt="" style={{ width: 19, height: 19, flexShrink: 0 }} />}
-          <span style={{
-            fontSize: 13, fontWeight: isTracked ? 700 : 500,
-            color: isTracked ? T.textPrimary : T.textSecondary,
-            overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-          }}>
-            {c.team?.shortDisplayName || c.team?.abbreviation}
-          </span>
-        </div>
-        <span style={{
-          fontSize: 15, fontWeight: 800, fontFamily: "'JetBrains Mono', monospace",
-          color: isTracked ? T.textPrimary : T.textSecondary, flexShrink: 0, marginLeft: 8,
-        }}>
-          {c.score ?? "–"}
-        </span>
-      </div>
-    );
-  };
-
-  let body;
-  if (loading) {
-    body = <div style={{ color: T.textSecondary, fontSize: 13 }}>Loading…</div>;
-  } else if (failed) {
-    body = <div style={{ color: T.textSecondary, fontSize: 13 }}>Couldn't load scores.</div>;
-  } else if (!game) {
-    body = <div style={{ color: T.textSecondary, fontSize: 13 }}>No game today.</div>;
-  } else {
-    body = (
-      <>
-        {away && <TeamRow c={away} />}
-        {home && <TeamRow c={home} />}
-        <div style={{
-          marginTop: 9, paddingTop: 9, borderTop: `1px solid ${T.border}`,
-          display: "flex", alignItems: "center", gap: 6,
-          color: isLive ? T.success : T.textSecondary, fontSize: 11, fontWeight: 700,
-          fontFamily: "'JetBrains Mono', monospace", textTransform: "uppercase", letterSpacing: "0.05em",
-        }}>
-          {isLive && <Dot color={T.success} size={6} pulse />}
-          {status.shortDetail || status.detail || "—"}
-        </div>
-      </>
-    );
-  }
-
-  return (
-    <Card style={{ borderTop: `2px solid ${accent}`, borderTopLeftRadius: 10, borderTopRightRadius: 10 }}>
-      <SectionLabel>{name}</SectionLabel>
-      {body}
-    </Card>
-  );
-}
-
-// ─── Date Divider ─────────────────────────────────────────────────────────────
-
-function DateDivider({ label }) {
-  return (
-    <div style={{ display: "flex", alignItems: "center", gap: 12, margin: "16px 0 9px" }}>
-      <div style={{ flex: 1, height: 1, background: T.border }} />
-      <span style={{ color: T.textMuted, fontSize: 11, fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase", fontFamily: "'JetBrains Mono', monospace" }}>
-        {label}
-      </span>
-      <div style={{ flex: 1, height: 1, background: T.border }} />
-    </div>
-  );
-}
-
-// ─── Settings Panel ───────────────────────────────────────────────────────────
-
-function SettingsPanel({ connections, activeConnectionId, onConnectionsChange, onActiveChange, timeMode, onTimeModeChange, iconRules, onIconRulesChange }) {
-  const [editingConn, setEditingConn]   = useState(null);
-  const [editingRule, setEditingRule]   = useState(null);
-  const [ruleForm, setRuleForm] = useState({ name: "", matchType: "app", matchValue: "", iconType: "emoji", iconData: "", iconShape: "circle" });
-  const [connForm, setConnForm]         = useState({ name: "", url: "" });
-  const fileInputRef = useRef(null);
-
-  const startEditConn = (conn) => {
-    setConnForm({ name: conn.name, url: conn.url });
-    setEditingConn(conn.id);
-  };
-
-  const startNewConn = () => {
-    setConnForm({ name: "", url: "ws://" });
-    setEditingConn("new");
-  };
-
-  const saveConn = () => {
-    if (!connForm.name.trim() || !connForm.url.trim()) return;
-    if (editingConn === "new") {
-      const id = `conn-${Date.now()}`;
-      const updated = [...connections, { id, name: connForm.name.trim(), url: connForm.url.trim() }];
-      onConnectionsChange(updated);
-      if (connections.length === 0) onActiveChange(id);
-    } else {
-      onConnectionsChange(connections.map(c => c.id === editingConn ? { ...c, name: connForm.name.trim(), url: connForm.url.trim() } : c));
-    }
-    setEditingConn(null);
-  };
-
-  const deleteConn = (id) => {
-    const updated = connections.filter(c => c.id !== id);
-    onConnectionsChange(updated);
-    if (activeConnectionId === id) onActiveChange(updated[0]?.id ?? null);
-  };
-
-  const startNewRule = () => {
-    setRuleForm({ name: "", matchType: "app", matchValue: "", iconType: "emoji", iconData: "", iconShape: "circle" });
-    setEditingRule("new");
-  };
-
-  const startEditRule = (rule) => {
-    setRuleForm({ name: rule.name, matchType: rule.matchType, matchValue: rule.matchValue, iconType: rule.iconType, iconData: rule.iconData, iconShape: rule.iconShape ?? "circle" });
-    setEditingRule(rule.id);
-  };
-
-  const saveRule = () => {
-    if (!ruleForm.matchValue.trim()) return;
-    if (editingRule === "new") {
-      const id = `rule-${Date.now()}`;
-      onIconRulesChange([...iconRules, { id, ...ruleForm, matchValue: ruleForm.matchValue.trim() }]);
-    } else {
-      onIconRulesChange(iconRules.map(r => r.id === editingRule ? { ...r, ...ruleForm, matchValue: ruleForm.matchValue.trim() } : r));
-    }
-    setEditingRule(null);
-  };
-
-  const deleteRule = (id) => onIconRulesChange(iconRules.filter(r => r.id !== id));
-
-  const handleImageUpload = async (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    try {
-      const data = await compressImage(file);
-      setRuleForm(f => ({ ...f, iconType: "image", iconData: data }));
-    } catch { alert("Could not load image."); }
-    e.target.value = "";
-  };
-
-  const formStyle = {
-    background: T.elevated, border: `1px solid ${T.border}`,
-    borderRadius: 10, padding: "14px 16px", marginTop: 10,
-  };
-
-  const inputStyle = {
-    background: T.surface, border: `1px solid ${T.border}`,
-    borderRadius: 7, padding: "8px 10px", color: T.textPrimary,
-    fontSize: 13, width: "100%", transition: "border-color 0.15s",
-  };
-
-  const btnPrimary = {
-    background: T.primary, color: "#fff", border: "none",
-    borderRadius: 7, padding: "8px 15px", cursor: "pointer", fontSize: 13, fontWeight: 600,
-    boxShadow: "0 1px 2px rgba(0,0,0,0.3)", transition: "background 0.15s",
-  };
-
-  const btnSecondary = {
-    background: T.elevated, color: T.textSecondary,
-    border: `1px solid ${T.border}`, borderRadius: 7,
-    padding: "8px 15px", cursor: "pointer", fontSize: 13, fontWeight: 500,
-  };
-
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-
-      <Card>
-        <SectionLabel>WebSocket Connections</SectionLabel>
-        <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
-          {connections.map(c => (
-            <div key={c.id} onClick={() => startEditConn(c)} style={{
-              display: "flex", alignItems: "center", gap: 8,
-              background: T.elevated, borderRadius: 8, padding: "9px 12px",
-              border: `1px solid ${activeConnectionId === c.id ? T.primary : T.border}`,
-              cursor: "pointer", transition: "border-color 0.15s, background 0.15s",
-            }}
-            onMouseEnter={e => { if (activeConnectionId !== c.id) e.currentTarget.style.background = T.elevatedHover; }}
-            onMouseLeave={e => { if (activeConnectionId !== c.id) e.currentTarget.style.background = T.elevated; }}
-            >
-              <input type="radio" checked={activeConnectionId === c.id}
-                onClick={(e) => e.stopPropagation()}
-                onChange={() => onActiveChange(c.id)}
-                style={{ accentColor: T.primary, flexShrink: 0 }} />
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ color: T.textPrimary, fontSize: 13, fontWeight: 600 }}>{c.name}</div>
-                <div style={{ color: T.textSecondary, fontSize: 11, fontFamily: "'JetBrains Mono', monospace", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.url}</div>
-              </div>
-              <IconBtn onClick={(e) => { e.stopPropagation(); startEditConn(c); }} color={T.textMuted} size={14} title="Edit">✎</IconBtn>
-              <IconBtn onClick={(e) => { e.stopPropagation(); deleteConn(c.id); }} color={T.textMuted} size={16} title="Delete">×</IconBtn>
-            </div>
-          ))}
-
-          {connections.length === 0 && (
-            <div style={{ color: T.textSecondary, fontSize: 13, padding: "8px 0" }}>No connections yet. Add one below.</div>
-          )}
-
-          {editingConn !== null && (
-            <div style={formStyle} onClick={(e) => e.stopPropagation()}>
-              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                <div>
-                  <div style={{ color: T.textSecondary, fontSize: 12, marginBottom: 4, fontWeight: 500 }}>Name</div>
-                  <input style={inputStyle} value={connForm.name} onChange={e => setConnForm(f => ({ ...f, name: e.target.value }))} placeholder="e.g. Home" />
-                </div>
-                <div>
-                  <div style={{ color: T.textSecondary, fontSize: 12, marginBottom: 4, fontWeight: 500 }}>WebSocket URL</div>
-                  <input style={{ ...inputStyle, fontFamily: "'JetBrains Mono', monospace" }}
-                    value={connForm.url} onChange={e => setConnForm(f => ({ ...f, url: e.target.value }))} placeholder="ws://192.168.x.x:8080" />
-                </div>
-                <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
-                  <button style={btnPrimary} onClick={saveConn}>Save</button>
-                  <button style={btnSecondary} onClick={() => setEditingConn(null)}>Cancel</button>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {editingConn === null && (
-            <button onClick={startNewConn} style={{
-              background: "none", color: T.textSecondary, border: `1px dashed ${T.borderStrong}`,
-              borderRadius: 8, padding: "8px 14px", cursor: "pointer", fontSize: 13, marginTop: 4, fontWeight: 500,
-              transition: "color 0.15s, border-color 0.15s",
-            }}>
-              + Add connection
-            </button>
-          )}
-        </div>
-      </Card>
-
-      <Card>
-        <SectionLabel>Display</SectionLabel>
-        <Toggle
-          value={timeMode === "relative"}
-          onChange={v => onTimeModeChange(v ? "relative" : "absolute")}
-          label={timeMode === "relative" ? "Showing time since received (e.g. 5m ago)" : "Showing exact date and time"}
-        />
-      </Card>
-
-      <Card>
-        <SectionLabel>Notification Icons</SectionLabel>
-        <div style={{ color: T.textSecondary, fontSize: 12, marginBottom: 12, lineHeight: 1.6 }}>
-          Assign a custom icon — an emoji or uploaded image — to notifications from a specific app or containing one or more keywords.
-          Separate multiple keywords with commas; a notification matches if it contains any of them.
-          Images are compressed to 64×64px and stored locally.
-        </div>
-
-        <div style={{ display: "flex", flexDirection: "column", gap: 7, marginBottom: 8 }}>
-          {iconRules.map(rule => (
-            <div key={rule.id} onClick={() => startEditRule(rule)} style={{
-              display: "flex", alignItems: "center", gap: 10,
-              background: T.elevated, borderRadius: 8, padding: "9px 12px",
-              border: `1px solid ${T.border}`,
-              cursor: "pointer", transition: "background 0.15s",
-            }}
-            onMouseEnter={e => { e.currentTarget.style.background = T.elevatedHover; }}
-            onMouseLeave={e => { e.currentTarget.style.background = T.elevated; }}
-            >
-              <NotifIcon rule={rule} color={T.textMuted} size={28} />
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ color: T.textPrimary, fontSize: 13, fontWeight: 600 }}>{rule.name || rule.matchValue}</div>
-                <div style={{ color: T.textSecondary, fontSize: 11, fontFamily: "'JetBrains Mono', monospace" }}>
-                  {rule.matchType === "app" ? "app: " : "keywords: "}{rule.matchValue}
-                </div>
-              </div>
-              <IconBtn onClick={(e) => { e.stopPropagation(); startEditRule(rule); }} color={T.textMuted} size={14} title="Edit">✎</IconBtn>
-              <IconBtn onClick={(e) => { e.stopPropagation(); deleteRule(rule.id); }} color={T.textMuted} size={16} title="Delete">×</IconBtn>
-            </div>
-          ))}
-
-          {iconRules.length === 0 && (
-            <div style={{ color: T.textSecondary, fontSize: 13, padding: "4px 0" }}>No icon rules yet.</div>
-          )}
-        </div>
-
-        {editingRule !== null && (
-          <div style={formStyle} onClick={(e) => e.stopPropagation()}>
-            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-              <div>
-                <div style={{ color: T.textSecondary, fontSize: 12, marginBottom: 4, fontWeight: 500 }}>Rule name (optional label)</div>
-                <input style={inputStyle} value={ruleForm.name} onChange={e => setRuleForm(f => ({ ...f, name: e.target.value }))} placeholder="e.g. Instagram, Work email…" />
-              </div>
-
-              <div style={{ display: "flex", gap: 8 }}>
-                <div style={{ flex: 1 }}>
-                  <div style={{ color: T.textSecondary, fontSize: 12, marginBottom: 4, fontWeight: 500 }}>Match by</div>
-                  <select value={ruleForm.matchType} onChange={e => setRuleForm(f => ({ ...f, matchType: e.target.value }))}
-                    style={{ ...inputStyle, cursor: "pointer" }}>
-                    <option value="app">App package name</option>
-                    <option value="keyword">Keyword(s) in text</option>
-                  </select>
-                </div>
-                <div style={{ flex: 2 }}>
-                  <div style={{ color: T.textSecondary, fontSize: 12, marginBottom: 4, fontWeight: 500 }}>
-                    {ruleForm.matchType === "app" ? "Package name (e.g. com.instagram.android)" : "Keywords (comma-separated)"}
-                  </div>
-                  <input style={{ ...inputStyle, fontFamily: ruleForm.matchType === "app" ? "'JetBrains Mono', monospace" : "inherit" }}
-                    value={ruleForm.matchValue} onChange={e => setRuleForm(f => ({ ...f, matchValue: e.target.value }))}
-                    placeholder={ruleForm.matchType === "app" ? "com.example.app" : "meeting, urgent, alert…"} />
-                </div>
-              </div>
-
-              <div>
-                <div style={{ color: T.textSecondary, fontSize: 12, marginBottom: 8, fontWeight: 500 }}>Icon type</div>
-                <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
-                  {["emoji", "image"].map(type => (
-                    <button key={type} onClick={() => setRuleForm(f => ({ ...f, iconType: type, iconData: "" }))} style={{
-                      background: ruleForm.iconType === type ? T.primary : T.surface,
-                      color: ruleForm.iconType === type ? "#fff" : T.textSecondary,
-                      border: `1px solid ${ruleForm.iconType === type ? T.primary : T.border}`,
-                      borderRadius: 7, padding: "6px 14px", cursor: "pointer", fontSize: 13, textTransform: "capitalize", fontWeight: 500,
-                    }}>
-                      {type === "emoji" ? "Emoji" : "Upload image"}
-                    </button>
-                  ))}
-                </div>
-
-                <div>
-                  <div style={{ color: T.textSecondary, fontSize: 12, marginBottom: 8, fontWeight: 500 }}>Icon shape</div>
-                  <div style={{ display: "flex", gap: 8 }}>
-                    {[
-                      { value: "circle", label: "Circle" },
-                      { value: "none",   label: "No background" },
-                    ].map(opt => (
-                      <button key={opt.value} onClick={() => setRuleForm(f => ({ ...f, iconShape: opt.value }))} style={{
-                        background: ruleForm.iconShape === opt.value ? T.primary : T.surface,
-                        color: ruleForm.iconShape === opt.value ? "#fff" : T.textSecondary,
-                        border: `1px solid ${ruleForm.iconShape === opt.value ? T.primary : T.border}`,
-                        borderRadius: 7, padding: "6px 14px", cursor: "pointer", fontSize: 13, fontWeight: 500,
-                      }}>
-                        {opt.label}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                {ruleForm.iconType === "emoji" ? (
-                  <div>
-                    <div style={{ color: T.textSecondary, fontSize: 12, marginBottom: 4, fontWeight: 500 }}>Emoji</div>
-                    <input style={{ ...inputStyle, fontSize: 20, width: 60, textAlign: "center" }}
-                      value={ruleForm.iconData} onChange={e => setRuleForm(f => ({ ...f, iconData: e.target.value }))}
-                      placeholder="📌" maxLength={2} />
-                  </div>
-                ) : (
-                  <div>
-                    <input ref={fileInputRef} type="file" accept="image/*" style={{ display: "none" }} onChange={handleImageUpload} />
-                    <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                      <button onClick={() => fileInputRef.current?.click()} style={btnSecondary}>
-                        {ruleForm.iconData ? "Change image" : "Choose image"}
-                      </button>
-                      {ruleForm.iconData && (
-                        <img src={ruleForm.iconData} alt="preview" style={{ width: 36, height: 36, borderRadius: "50%", objectFit: "cover", border: `1px solid ${T.border}` }} />
-                      )}
-                      {!ruleForm.iconData && (
-                        <span style={{ color: T.textSecondary, fontSize: 12 }}>No image chosen</span>
-                      )}
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              {(ruleForm.iconData || ruleForm.iconType === "emoji") && (
-                <div style={{ display: "flex", alignItems: "center", gap: 8, background: T.surface, borderRadius: 8, padding: "8px 12px" }}>
-                  <NotifIcon rule={{ ...ruleForm, id: "preview" }} color={T.textMuted} size={28} />
-                  <span style={{ color: T.textSecondary, fontSize: 12 }}>Preview</span>
-                </div>
-              )}
-
-              <div style={{ display: "flex", gap: 8 }}>
-                <button style={btnPrimary} onClick={saveRule}>Save rule</button>
-                <button style={btnSecondary} onClick={() => setEditingRule(null)}>Cancel</button>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {editingRule === null && (
-          <button onClick={startNewRule} style={{
-            background: "none", color: T.textSecondary, border: `1px dashed ${T.borderStrong}`,
-            borderRadius: 8, padding: "8px 14px", cursor: "pointer", fontSize: 13, fontWeight: 500,
-          }}>
-            + Add icon rule
-          </button>
-        )}
-      </Card>
-    </div>
-  );
-}
 
 // ─── Main App ─────────────────────────────────────────────────────────────────
 
@@ -970,6 +37,7 @@ export default function App() {
 
   const [timeMode, setTimeMode]     = useState(() => load("nd_timemode", "absolute"));
   const [iconRules, setIconRules]   = useState(() => load("nd_iconrules", []));
+  const [teamWidgets, setTeamWidgets] = useState(() => normalizeWidgets(load("nd_teamwidgets", DEFAULT_TEAM_WIDGETS)));
 
   const [activeTab, setActiveTab]     = useState("all");
   const [filter, setFilter]           = useState("All");
@@ -988,6 +56,7 @@ export default function App() {
   useEffect(() => { save("nd_active_conn", activeConnectionId); }, [activeConnectionId]);
   useEffect(() => { save("nd_timemode", timeMode); }, [timeMode]);
   useEffect(() => { save("nd_iconrules", iconRules); }, [iconRules]);
+  useEffect(() => { save("nd_teamwidgets", teamWidgets); }, [teamWidgets]);
 
   useEffect(() => {
     if (!showConnMenu) return;
@@ -1057,6 +126,7 @@ export default function App() {
 
     if (wsRef.current) wsRef.current.close();
     setConnecting(true);
+    setStats({ batteryPct: null, notifCount: null, screenTimeMs: null });
     const ws = new WebSocket(url);
 
     ws.onopen = () => {
@@ -1091,6 +161,7 @@ export default function App() {
         if (JUNK_PACKAGES.includes(raw.packageName)) return;
         if (!passesAppAllowlist(raw)) return;
         if (!passesAppBannedPrefixes(raw)) return;
+        if (!passesAppBannedExact(raw)) return;
         if (!passesJunkHeaderKeywords(raw)) return;
         mergeNotifications([{ ...raw, id: generateId(raw), starred: false, group: null }]);
       } catch (e) { console.warn("Bad payload", e); }
@@ -1188,6 +259,12 @@ export default function App() {
     { id: "settings", label: "Settings", count: null },
   ];
 
+  const handleWidgetLayoutChange = (id, layout) => {
+    setTeamWidgets(prev => prev.map(w => w.id === id ? { ...w, layout } : w));
+  };
+
+  const activeTeamWidgets = teamWidgets.filter(w => w.enabled !== false);
+
   return (
     <div style={{ minHeight: "100vh", background: T.bg, color: T.textMuted, fontFamily: "'Inter', -apple-system, sans-serif" }}>
       <style>{`
@@ -1196,6 +273,11 @@ export default function App() {
         @keyframes pulseRing {
           0%   { transform: scale(1);   opacity: 0.55; }
           100% { transform: scale(2.6); opacity: 0; }
+        }
+        @keyframes shimmer {
+          0%   { opacity: 0.35; }
+          50%  { opacity: 0.75; }
+          100% { opacity: 0.35; }
         }
         * { box-sizing: border-box; margin: 0; padding: 0; }
         input, button, select { font-family: inherit; }
@@ -1215,18 +297,7 @@ export default function App() {
         padding: "0 24px",
       }}>
         <div style={{ display: "flex", alignItems: "center", gap: 14, height: 56, flexWrap: "wrap" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 9, flexShrink: 0 }}>
-            <div style={{
-              width: 24, height: 24, borderRadius: 7,
-              background: `linear-gradient(135deg, ${T.primary}, #8B5CF6)`,
-              display: "flex", alignItems: "center", justifyContent: "center",
-              fontSize: 13, fontWeight: 800, color: "#fff",
-              boxShadow: `0 2px 8px ${T.primary}55`,
-            }}>
-              N
-            </div>
-            <span style={{ fontSize: 16, fontWeight: 800, letterSpacing: "-0.02em", color: T.textPrimary }}>Notify</span>
-          </div>
+          <span style={{ fontSize: 15, fontWeight: 800, letterSpacing: "-0.02em", flexShrink: 0, color: T.textPrimary }}>Notify</span>
 
           <div ref={connMenuRef} style={{ position: "relative" }}>
             <div onClick={() => setShowConnMenu(v => !v)} style={{ cursor: "pointer" }}>
@@ -1266,14 +337,20 @@ export default function App() {
             )}
           </div>
 
-          {connected && stats.batteryPct !== null && (
-            <BatteryBar pct={stats.batteryPct} />
+          {connected && (
+            stats.batteryPct !== null
+              ? <BatteryBar pct={stats.batteryPct} />
+              : <StatSkeleton width={66} />
           )}
-          {connected && stats.screenTimeMs !== null && stats.screenTimeMs >= 0 && (
-            <Tag>📱 {formatDuration(stats.screenTimeMs)}</Tag>
+          {connected && (
+            stats.screenTimeMs !== null && stats.screenTimeMs >= 0
+              ? <Tag>📱 {formatDuration(stats.screenTimeMs)}</Tag>
+              : <StatSkeleton width={70} />
           )}
-          {connected && stats.notifCount !== null && (
-            <Tag>🔔 {stats.notifCount} today</Tag>
+          {connected && (
+            stats.notifCount !== null
+              ? <Tag>🔔 {stats.notifCount} today</Tag>
+              : <StatSkeleton width={84} />
           )}
 
           <div style={{ flex: 1 }} />
@@ -1319,8 +396,8 @@ export default function App() {
         </div>
       </div>
 
-      <div style={{ padding: "18px 24px", maxWidth: 1180, margin: "0 auto", display: "flex", gap: 20, alignItems: "flex-start" }}>
-      <div style={{ flex: 1, minWidth: 0, maxWidth: 900 }}>
+      <div style={{ padding: "18px 24px", maxWidth: 1760, margin: "0 auto", display: "flex", gap: 24, alignItems: "flex-start" }}>
+      <div style={{ flex: 1, minWidth: 0, maxWidth: 1200 }}>
 
         {activeTab === "settings" ? (
           <SettingsPanel
@@ -1332,6 +409,8 @@ export default function App() {
             onTimeModeChange={setTimeMode}
             iconRules={iconRules}
             onIconRulesChange={setIconRules}
+            teamWidgets={teamWidgets}
+            onTeamWidgetsChange={setTeamWidgets}
           />
         ) : (
           <>
@@ -1451,11 +530,13 @@ export default function App() {
         )}
       </div>
 
-      {activeTab !== "settings" && TEAM_WIDGETS.length > 0 && (
-        <div style={{ width: 240, flexShrink: 0, display: "flex", flexDirection: "column", gap: 14, position: "sticky", top: 82 }}>
-          {TEAM_WIDGETS.map(w => (
-            <TeamCard key={`${w.league}-${w.abbreviation}`} sport={w.sport} league={w.league} abbreviation={w.abbreviation} name={w.name} />
-          ))}
+      {activeTab !== "settings" && teamWidgets.length > 0 && (
+        <div style={{
+          flexShrink: 0,
+          position: "sticky", top: 82, maxHeight: "calc(100vh - 100px)", overflowY: "auto", overflowX: "hidden",
+          paddingRight: 2,
+        }}>
+          <WidgetGrid widgets={teamWidgets} onLayoutChange={handleWidgetLayoutChange} />
         </div>
       )}
       </div>
