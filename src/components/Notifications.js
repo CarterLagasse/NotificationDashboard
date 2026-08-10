@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo, memo } from "react";
 import { T, getAppColor, APP_CLICK_LINKS } from "../theme";
 import { timeAgo, formatAbsolute, parseKeywords } from "../utils";
 import { Dot, Tag, IconBtn } from "./Primitives";
@@ -60,14 +60,25 @@ function NotifIcon({ rule, color, size = 32 }) {
   );
 }
 
-
 // Finds the first icon rule (from Settings) that matches a notification,
 // either by exact app package or by keyword found in its title/text.
-function resolveIcon(n, iconRules) {
+//
+// `parsedKeywordRules` is an optional precomputed list of
+// { rule, keywords } pairs (keywords already split via parseKeywords) so
+// callers rendering many notifications against the same rule set don't pay
+// the string-split cost of parseKeywords() on every single card, every
+// render. Falls back to parsing inline if it isn't provided.
+function resolveIcon(n, iconRules, parsedKeywordRules) {
   for (const rule of iconRules) {
     if (rule.matchType === "app" && rule.matchValue === n.packageName) return rule;
   }
   const text = `${n.appName} ${n.title || ""} ${n.text || ""}`.toLowerCase();
+  if (parsedKeywordRules) {
+    for (const { rule, keywords } of parsedKeywordRules) {
+      if (keywords.some(k => text.includes(k))) return rule;
+    }
+    return null;
+  }
   for (const rule of iconRules) {
     if (rule.matchType === "keyword") {
       const keywords = parseKeywords(rule.matchValue);
@@ -77,14 +88,34 @@ function resolveIcon(n, iconRules) {
   return null;
 }
 
+// Precomputes { rule, keywords } for every keyword-type rule. Call once at
+// the list level (memoized on iconRules) and pass the result down to each
+// NotificationCard via the parsedKeywordRules prop so the split only runs
+// when the rule set actually changes, not on every card/every render.
+function useParsedKeywordRules(iconRules) {
+  return useMemo(
+    () => iconRules
+      .filter(r => r.matchType === "keyword")
+      .map(rule => ({ rule, keywords: parseKeywords(rule.matchValue) })),
+    [iconRules]
+  );
+}
+
 // ─── Notification Card ──────────────────────────────────────────────────
-function NotificationCard({ notification: n, onDelete, onStar, onGroupAssign, groups, selected, onSelect, selectMode, isNew, timeMode, iconRules }) {
+const NotificationCard = memo(function NotificationCard({ notification: n, onDelete, onStar, onGroupAssign, groups, selected, onSelect, selectMode, isNew, timeMode, iconRules, parsedKeywordRules }) {
   const color = getAppColor(n.packageName);
   const [showGroupMenu, setShowGroupMenu] = useState(false);
-  const [hov, setHov] = useState(false);
   const menuRef = useRef(null);
-  const iconRule = resolveIcon(n, iconRules);
+  const cardRef = useRef(null);
   const clickLink = APP_CLICK_LINKS[n.packageName];
+
+  // Only recompute the matched icon rule when something that could actually
+  // change the match result changes — not on every unrelated re-render
+  // (e.g. sibling cards' hover state, selection toggles elsewhere in the list).
+  const iconRule = useMemo(
+    () => resolveIcon(n, iconRules, parsedKeywordRules),
+    [n.packageName, n.title, n.text, n.appName, iconRules, parsedKeywordRules]
+  );
 
   useEffect(() => {
     if (!showGroupMenu) return;
@@ -98,17 +129,33 @@ function NotificationCard({ notification: n, onDelete, onStar, onGroupAssign, gr
     if (clickLink) window.open(clickLink, "_blank", "noopener,noreferrer");
   };
 
+  // Hover is handled via direct style mutation instead of useState so that
+  // mouse movement over the list doesn't trigger a React re-render per card
+  // (matches the pattern already used for row hover in SettingsPanel).
+  const handleMouseEnter = () => {
+    if (cardRef.current && !selected) {
+      cardRef.current.style.background = T.surfaceHover;
+      cardRef.current.style.boxShadow = "0 2px 8px rgba(0,0,0,0.28)";
+    }
+  };
+  const handleMouseLeave = () => {
+    if (cardRef.current && !selected) {
+      cardRef.current.style.background = T.surface;
+      cardRef.current.style.boxShadow = "0 1px 2px rgba(0,0,0,0.16)";
+    }
+  };
+
   return (
-    <div onClick={handleCardClick}
-      onMouseEnter={() => setHov(true)} onMouseLeave={() => setHov(false)}
+    <div ref={cardRef} onClick={handleCardClick}
+      onMouseEnter={handleMouseEnter} onMouseLeave={handleMouseLeave}
       style={{
-        background: selected ? T.primarySoft : (hov ? T.surfaceHover : T.surface),
+        background: selected ? T.primarySoft : T.surface,
         border: `1px solid ${selected ? T.primary : T.border}`,
         borderLeft: `3px solid ${n.starred ? T.star : color}`,
         borderRadius: 10, padding: "12px 14px", marginBottom: 7,
         animation: isNew ? "slideIn 0.25s ease" : "none",
         transition: "border-color 0.15s, background 0.15s, box-shadow 0.15s",
-        boxShadow: hov ? "0 2px 8px rgba(0,0,0,0.28)" : "0 1px 2px rgba(0,0,0,0.16)",
+        boxShadow: "0 1px 2px rgba(0,0,0,0.16)",
         display: "flex", gap: 12, alignItems: "flex-start",
         cursor: selectMode || clickLink ? "pointer" : "default",
       }}>
@@ -188,7 +235,7 @@ function NotificationCard({ notification: n, onDelete, onStar, onGroupAssign, gr
       </div>
     </div>
   );
-}
+});
 
 
 // ─── Date Divider ────────────────────────────────────────────────────────
@@ -204,4 +251,4 @@ function DateDivider({ label }) {
   );
 }
 
-export { NotifIcon, resolveIcon, NotificationCard, DateDivider };
+export { NotifIcon, resolveIcon, useParsedKeywordRules, NotificationCard, DateDivider };

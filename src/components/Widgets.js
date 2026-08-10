@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo, memo } from "react";
 import { T } from "../theme";
 import { Dot, Card, SectionLabel } from "./Primitives";
 
@@ -204,7 +204,228 @@ function formatGameTime(dateStr) {
   return `${datePart} · ${timePart}`;
 }
 
-function TeamCard({ sport, league, abbreviation, name, showWildCard = true, contentLevel = "standard" }) {
+// ── Hoisted subcomponents ──────────────────────────────────────────────
+// These previously lived as nested function declarations inside TeamCard's
+// render body, which meant React saw a brand-new component *type* on every
+// render (including every silent 60s refetch) and tore down/remounted the
+// whole subtree instead of diffing it — logos re-fetched/re-decoded,
+// transitions couldn't run, wasted render work. Hoisting to module scope
+// gives them a stable identity so React can reconcile normally.
+
+function TeamRow({ c, abbreviation }) {
+  const isTracked = c.team?.abbreviation === abbreviation;
+  const record = c?.records?.find(r => r.type === "total")?.summary;
+  return (
+    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "4px 0" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+        {c.team?.logo && <img src={c.team.logo} alt="" style={{ width: 20, height: 20, flexShrink: 0 }} />}
+        <div style={{ minWidth: 0 }}>
+          <div style={{
+            fontSize: 13.5, fontWeight: isTracked ? 700 : 500,
+            color: isTracked ? T.textPrimary : T.textSecondary,
+            overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+          }}>
+            {c.team?.shortDisplayName || c.team?.abbreviation}
+          </div>
+          {record && (
+            <div style={{ fontSize: 10.5, color: T.textMuted, fontFamily: "'JetBrains Mono', monospace" }}>
+              {record}
+            </div>
+          )}
+        </div>
+      </div>
+      <span style={{
+        fontSize: 17, fontWeight: 800, fontFamily: "'JetBrains Mono', monospace",
+        color: isTracked ? T.textPrimary : T.textSecondary, flexShrink: 0, marginLeft: 8,
+      }}>
+        {c.score ?? "–"}
+      </span>
+    </div>
+  );
+}
+
+// Per-inning box score (R across innings, plus totals R/H/E).
+function BoxScoreRow({ c, abbreviation, innings }) {
+  const isTracked = c.team?.abbreviation === abbreviation;
+  const cell = { flex: "0 0 auto", width: 18, textAlign: "center", fontFamily: "'JetBrains Mono', monospace" };
+  return (
+    <div style={{ display: "flex", gap: 3, alignItems: "center", padding: "1px 0" }}>
+      <div style={{
+        width: 34, flexShrink: 0, fontSize: 10.5, fontWeight: isTracked ? 700 : 500,
+        color: isTracked ? T.textPrimary : T.textSecondary,
+      }}>
+        {c.team?.abbreviation}
+      </div>
+      {Array.from({ length: innings }).map((_, i) => (
+        <div key={i} style={{ ...cell, fontSize: 10.5, color: T.textSecondary }}>
+          {c.linescores?.[i]?.displayValue ?? "–"}
+        </div>
+      ))}
+      <div style={{ ...cell, width: 20, fontSize: 10.5, fontWeight: 700, color: T.textPrimary }}>{c.score ?? "–"}</div>
+      <div style={{ ...cell, width: 20, fontSize: 10.5, color: T.textSecondary }}>{c.hits ?? "–"}</div>
+      <div style={{ ...cell, width: 20, fontSize: 10.5, color: T.textSecondary }}>{c.errors ?? "–"}</div>
+    </div>
+  );
+}
+
+function BoxScore({ away, home, abbreviation, innings }) {
+  if (!away || !home) return null;
+  const cell = { flex: "0 0 auto", width: 18, textAlign: "center", fontFamily: "'JetBrains Mono', monospace" };
+  return (
+    <div style={{ marginTop: 8, paddingTop: 8, borderTop: `1px solid ${T.border}`, overflowX: "auto" }}>
+      <div style={{ display: "flex", gap: 3, marginBottom: 3 }}>
+        <div style={{ width: 34, flexShrink: 0 }} />
+        {Array.from({ length: innings }).map((_, i) => (
+          <div key={i} style={{ ...cell, fontSize: 9.5, color: T.textMuted }}>{i + 1}</div>
+        ))}
+        <div style={{ ...cell, width: 20, fontSize: 9.5, fontWeight: 700, color: T.textSecondary }}>R</div>
+        <div style={{ ...cell, width: 20, fontSize: 9.5, fontWeight: 700, color: T.textSecondary }}>H</div>
+        <div style={{ ...cell, width: 20, fontSize: 9.5, fontWeight: 700, color: T.textSecondary }}>E</div>
+      </div>
+      <BoxScoreRow c={away} abbreviation={abbreviation} innings={innings} />
+      <BoxScoreRow c={home} abbreviation={abbreviation} innings={innings} />
+    </div>
+  );
+}
+
+// Stat leaders for the tracked team specifically (AVG / HR / RBI).
+function Leaders({ trackedTeam }) {
+  const leadersArr = trackedTeam?.leaders;
+  if (!leadersArr || leadersArr.length === 0) return null;
+  const pick = (statName) => leadersArr.find(l => l.name === statName)?.leaders?.[0];
+  const avg = pick("avg");
+  const hr  = pick("homeRuns");
+  const rbi = pick("RBIs");
+  if (!avg && !hr && !rbi) return null;
+  return (
+    <div style={{ marginTop: 8, paddingTop: 8, borderTop: `1px solid ${T.border}` }}>
+      <div style={{ fontSize: 10, fontWeight: 700, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4 }}>
+        Top performers
+      </div>
+      <LeaderRow label="AVG" leader={avg} />
+      <LeaderRow label="HR"  leader={hr} />
+      <LeaderRow label="RBI" leader={rbi} />
+    </div>
+  );
+}
+
+// Probable starting pitcher (shown before first pitch).
+function ProbablePitcher({ isPre, trackedTeam }) {
+  if (!isPre) return null;
+  const probable = trackedTeam?.probables?.[0];
+  if (!probable?.athlete) return null;
+  return (
+    <div style={{ marginTop: 8, paddingTop: 8, borderTop: `1px solid ${T.border}` }}>
+      <div style={{ fontSize: 10, fontWeight: 700, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4 }}>
+        Probable starter
+      </div>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+        <span style={{ fontSize: 12.5, fontWeight: 600, color: T.textPrimary }}>
+          {probable.athlete.shortName || probable.athlete.displayName}
+        </span>
+        {probable.record && (
+          <span style={{ fontSize: 11.5, color: T.textSecondary }}>{probable.record}</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Next several scheduled games, each with opponent + probable starter when known.
+function UpcomingGames({ upcoming }) {
+  if (upcoming.length === 0) return null;
+  return (
+    <div style={{ marginTop: 8, paddingTop: 8, borderTop: `1px solid ${T.border}` }}>
+      <div style={{ fontSize: 10, fontWeight: 700, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 8 }}>
+        Upcoming games
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 9 }}>
+        {upcoming.map(g => (
+          <div key={g.id} style={{ display: "flex", alignItems: "center", gap: 9 }}>
+            {g.opponentLogo && <img src={g.opponentLogo} alt="" style={{ width: 20, height: 20, flexShrink: 0 }} />}
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 12.5, fontWeight: 600, color: T.textPrimary, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {g.isHome ? "vs" : "@"} {g.opponentName}
+              </div>
+              <div style={{ fontSize: 11, color: T.textSecondary, fontFamily: "'JetBrains Mono', monospace" }}>
+                {formatGameTime(g.date)}
+              </div>
+            </div>
+            <div style={{ fontSize: 11, color: T.textMuted, textAlign: "right", maxWidth: 90, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {g.probable || "TBD"}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// Compact standings table shared by the division and wild-card sections.
+function StandingsTable({ rows, gbKey, highlightAbbr }) {
+  return (
+    <div style={{ marginTop: 6 }}>
+      <div style={{ display: "flex", gap: 4, padding: "2px 0 3px", fontSize: 9.5, fontWeight: 700, color: T.textMuted, fontFamily: "'JetBrains Mono', monospace", textTransform: "uppercase" }}>
+        <div style={{ flex: 1 }}>Team</div>
+        <div style={{ width: 26, textAlign: "center" }}>W</div>
+        <div style={{ width: 26, textAlign: "center" }}>L</div>
+        <div style={{ width: 32, textAlign: "center" }}>GB</div>
+        <div style={{ width: 40, textAlign: "center" }}>Strk</div>
+        <div style={{ width: 38, textAlign: "center" }}>L10</div>
+      </div>
+      {rows.map(r => (
+        <div key={r.abbr} style={{
+          display: "flex", gap: 4, alignItems: "center", padding: "3px 0",
+          background: r.abbr === highlightAbbr ? T.primarySoft : "transparent",
+          borderRadius: 5,
+        }}>
+          <div style={{ flex: 1, display: "flex", alignItems: "center", gap: 5, minWidth: 0 }}>
+            {r.logo && <img src={r.logo} alt="" style={{ width: 15, height: 15, flexShrink: 0 }} />}
+            <span style={{
+              fontSize: 11.5, fontWeight: r.abbr === highlightAbbr ? 700 : 500,
+              color: r.abbr === highlightAbbr ? T.textPrimary : T.textSecondary,
+              overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+            }}>
+              {r.abbr}
+            </span>
+          </div>
+          <div style={{ width: 26, textAlign: "center", fontSize: 11.5, color: T.textPrimary, fontFamily: "'JetBrains Mono', monospace" }}>{r.wins ?? "–"}</div>
+          <div style={{ width: 26, textAlign: "center", fontSize: 11.5, color: T.textSecondary, fontFamily: "'JetBrains Mono', monospace" }}>{r.losses ?? "–"}</div>
+          <div style={{ width: 32, textAlign: "center", fontSize: 11.5, color: T.textSecondary, fontFamily: "'JetBrains Mono', monospace" }}>{r[gbKey]}</div>
+          <div style={{ width: 40, textAlign: "center", fontSize: 11, color: T.textSecondary, fontFamily: "'JetBrains Mono', monospace" }}>{r.streak}</div>
+          <div style={{ width: 38, textAlign: "center", fontSize: 11, color: T.textSecondary, fontFamily: "'JetBrains Mono', monospace" }}>{r.l10}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function Standings({ standingsFailed, division, wildCard, showWildCard, divisionName, abbreviation }) {
+  if (standingsFailed || (!division && !(showWildCard && wildCard))) return null;
+  const leagueAbbr = divisionName ? divisionName.split(" ")[0] : "";
+  return (
+    <div style={{ marginTop: 8, paddingTop: 8, borderTop: `1px solid ${T.border}` }}>
+      {division && (
+        <>
+          <div style={{ fontSize: 10, fontWeight: 700, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.06em" }}>
+            {divisionName}
+          </div>
+          <StandingsTable rows={division} gbKey="gb" highlightAbbr={abbreviation} />
+        </>
+      )}
+      {showWildCard && wildCard && (
+        <>
+          <div style={{ fontSize: 10, fontWeight: 700, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.06em", marginTop: 8 }}>
+            {leagueAbbr} Wild Card
+          </div>
+          <StandingsTable rows={wildCard} gbKey="wcGb" highlightAbbr={abbreviation} />
+        </>
+      )}
+    </div>
+  );
+}
+
+const TeamCard = memo(function TeamCard({ sport, league, abbreviation, name, showWildCard = true, contentLevel = "standard" }) {
   const [game, setGame]         = useState(null);
   const [loading, setLoading]   = useState(true);
   const [failed, setFailed]     = useState(false);
@@ -313,221 +534,7 @@ function TeamCard({ sport, league, abbreviation, name, showWildCard = true, cont
   const isPre  = status.state === "pre";
   const trackedTeam = [away, home].find(c => c?.team?.abbreviation === abbreviation);
   const accent = trackedTeam?.team?.color ? `#${trackedTeam.team.color}` : T.primary;
-
-  const recordOf = (c) => c?.records?.find(r => r.type === "total")?.summary;
   const innings = Math.max(away?.linescores?.length || 0, home?.linescores?.length || 0, 9);
-
-  const TeamRow = ({ c }) => {
-    const isTracked = c.team?.abbreviation === abbreviation;
-    const record = recordOf(c);
-    return (
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "4px 0" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
-          {c.team?.logo && <img src={c.team.logo} alt="" style={{ width: 20, height: 20, flexShrink: 0 }} />}
-          <div style={{ minWidth: 0 }}>
-            <div style={{
-              fontSize: 13.5, fontWeight: isTracked ? 700 : 500,
-              color: isTracked ? T.textPrimary : T.textSecondary,
-              overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-            }}>
-              {c.team?.shortDisplayName || c.team?.abbreviation}
-            </div>
-            {record && (
-              <div style={{ fontSize: 10.5, color: T.textMuted, fontFamily: "'JetBrains Mono', monospace" }}>
-                {record}
-              </div>
-            )}
-          </div>
-        </div>
-        <span style={{
-          fontSize: 17, fontWeight: 800, fontFamily: "'JetBrains Mono', monospace",
-          color: isTracked ? T.textPrimary : T.textSecondary, flexShrink: 0, marginLeft: 8,
-        }}>
-          {c.score ?? "–"}
-        </span>
-      </div>
-    );
-  };
-
-  // Per-inning box score (R across innings, plus totals R/H/E).
-  const BoxScore = () => {
-    if (!away || !home) return null;
-    const cell = { flex: "0 0 auto", width: 18, textAlign: "center", fontFamily: "'JetBrains Mono', monospace" };
-    const HeaderRow = () => (
-      <div style={{ display: "flex", gap: 3, marginBottom: 3 }}>
-        <div style={{ width: 34, flexShrink: 0 }} />
-        {Array.from({ length: innings }).map((_, i) => (
-          <div key={i} style={{ ...cell, fontSize: 9.5, color: T.textMuted }}>{i + 1}</div>
-        ))}
-        <div style={{ ...cell, width: 20, fontSize: 9.5, fontWeight: 700, color: T.textSecondary }}>R</div>
-        <div style={{ ...cell, width: 20, fontSize: 9.5, fontWeight: 700, color: T.textSecondary }}>H</div>
-        <div style={{ ...cell, width: 20, fontSize: 9.5, fontWeight: 700, color: T.textSecondary }}>E</div>
-      </div>
-    );
-    const Row = ({ c }) => {
-      const isTracked = c.team?.abbreviation === abbreviation;
-      return (
-        <div style={{ display: "flex", gap: 3, alignItems: "center", padding: "1px 0" }}>
-          <div style={{
-            width: 34, flexShrink: 0, fontSize: 10.5, fontWeight: isTracked ? 700 : 500,
-            color: isTracked ? T.textPrimary : T.textSecondary,
-          }}>
-            {c.team?.abbreviation}
-          </div>
-          {Array.from({ length: innings }).map((_, i) => (
-            <div key={i} style={{ ...cell, fontSize: 10.5, color: T.textSecondary }}>
-              {c.linescores?.[i]?.displayValue ?? "–"}
-            </div>
-          ))}
-          <div style={{ ...cell, width: 20, fontSize: 10.5, fontWeight: 700, color: T.textPrimary }}>{c.score ?? "–"}</div>
-          <div style={{ ...cell, width: 20, fontSize: 10.5, color: T.textSecondary }}>{c.hits ?? "–"}</div>
-          <div style={{ ...cell, width: 20, fontSize: 10.5, color: T.textSecondary }}>{c.errors ?? "–"}</div>
-        </div>
-      );
-    };
-    return (
-      <div style={{ marginTop: 8, paddingTop: 8, borderTop: `1px solid ${T.border}`, overflowX: "auto" }}>
-        <HeaderRow />
-        <Row c={away} />
-        <Row c={home} />
-      </div>
-    );
-  };
-
-  // Stat leaders for the tracked team specifically (AVG / HR / RBI).
-  const Leaders = () => {
-    const leadersArr = trackedTeam?.leaders;
-    if (!leadersArr || leadersArr.length === 0) return null;
-    const pick = (statName) => leadersArr.find(l => l.name === statName)?.leaders?.[0];
-    const avg = pick("avg");
-    const hr  = pick("homeRuns");
-    const rbi = pick("RBIs");
-    if (!avg && !hr && !rbi) return null;
-    return (
-      <div style={{ marginTop: 8, paddingTop: 8, borderTop: `1px solid ${T.border}` }}>
-        <div style={{ fontSize: 10, fontWeight: 700, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4 }}>
-          Top performers
-        </div>
-        <LeaderRow label="AVG" leader={avg} />
-        <LeaderRow label="HR"  leader={hr} />
-        <LeaderRow label="RBI" leader={rbi} />
-      </div>
-    );
-  };
-
-  // Probable starting pitcher (shown before first pitch).
-  const ProbablePitcher = () => {
-    if (!isPre) return null;
-    const probable = trackedTeam?.probables?.[0];
-    if (!probable?.athlete) return null;
-    return (
-      <div style={{ marginTop: 8, paddingTop: 8, borderTop: `1px solid ${T.border}` }}>
-        <div style={{ fontSize: 10, fontWeight: 700, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4 }}>
-          Probable starter
-        </div>
-        <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
-          <span style={{ fontSize: 12.5, fontWeight: 600, color: T.textPrimary }}>
-            {probable.athlete.shortName || probable.athlete.displayName}
-          </span>
-          {probable.record && (
-            <span style={{ fontSize: 11.5, color: T.textSecondary }}>{probable.record}</span>
-          )}
-        </div>
-      </div>
-    );
-  };
-
-  // Next several scheduled games, each with opponent + probable starter when known.
-  const UpcomingGames = () => {
-    if (upcoming.length === 0) return null;
-    return (
-      <div style={{ marginTop: 8, paddingTop: 8, borderTop: `1px solid ${T.border}` }}>
-        <div style={{ fontSize: 10, fontWeight: 700, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 8 }}>
-          Upcoming games
-        </div>
-        <div style={{ display: "flex", flexDirection: "column", gap: 9 }}>
-          {upcoming.map(g => (
-            <div key={g.id} style={{ display: "flex", alignItems: "center", gap: 9 }}>
-              {g.opponentLogo && <img src={g.opponentLogo} alt="" style={{ width: 20, height: 20, flexShrink: 0 }} />}
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontSize: 12.5, fontWeight: 600, color: T.textPrimary, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {g.isHome ? "vs" : "@"} {g.opponentName}
-                </div>
-                <div style={{ fontSize: 11, color: T.textSecondary, fontFamily: "'JetBrains Mono', monospace" }}>
-                  {formatGameTime(g.date)}
-                </div>
-              </div>
-              <div style={{ fontSize: 11, color: T.textMuted, textAlign: "right", maxWidth: 90, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                {g.probable || "TBD"}
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-    );
-  };
-
-  // Compact standings table shared by the division and wild-card sections.
-  const StandingsTable = ({ rows, gbKey, highlightAbbr }) => (
-    <div style={{ marginTop: 6 }}>
-      <div style={{ display: "flex", gap: 4, padding: "2px 0 3px", fontSize: 9.5, fontWeight: 700, color: T.textMuted, fontFamily: "'JetBrains Mono', monospace", textTransform: "uppercase" }}>
-        <div style={{ flex: 1 }}>Team</div>
-        <div style={{ width: 26, textAlign: "center" }}>W</div>
-        <div style={{ width: 26, textAlign: "center" }}>L</div>
-        <div style={{ width: 32, textAlign: "center" }}>GB</div>
-        <div style={{ width: 40, textAlign: "center" }}>Strk</div>
-        <div style={{ width: 38, textAlign: "center" }}>L10</div>
-      </div>
-      {rows.map(r => (
-        <div key={r.abbr} style={{
-          display: "flex", gap: 4, alignItems: "center", padding: "3px 0",
-          background: r.abbr === highlightAbbr ? T.primarySoft : "transparent",
-          borderRadius: 5,
-        }}>
-          <div style={{ flex: 1, display: "flex", alignItems: "center", gap: 5, minWidth: 0 }}>
-            {r.logo && <img src={r.logo} alt="" style={{ width: 15, height: 15, flexShrink: 0 }} />}
-            <span style={{
-              fontSize: 11.5, fontWeight: r.abbr === highlightAbbr ? 700 : 500,
-              color: r.abbr === highlightAbbr ? T.textPrimary : T.textSecondary,
-              overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-            }}>
-              {r.abbr}
-            </span>
-          </div>
-          <div style={{ width: 26, textAlign: "center", fontSize: 11.5, color: T.textPrimary, fontFamily: "'JetBrains Mono', monospace" }}>{r.wins ?? "–"}</div>
-          <div style={{ width: 26, textAlign: "center", fontSize: 11.5, color: T.textSecondary, fontFamily: "'JetBrains Mono', monospace" }}>{r.losses ?? "–"}</div>
-          <div style={{ width: 32, textAlign: "center", fontSize: 11.5, color: T.textSecondary, fontFamily: "'JetBrains Mono', monospace" }}>{r[gbKey]}</div>
-          <div style={{ width: 40, textAlign: "center", fontSize: 11, color: T.textSecondary, fontFamily: "'JetBrains Mono', monospace" }}>{r.streak}</div>
-          <div style={{ width: 38, textAlign: "center", fontSize: 11, color: T.textSecondary, fontFamily: "'JetBrains Mono', monospace" }}>{r.l10}</div>
-        </div>
-      ))}
-    </div>
-  );
-
-  const Standings = () => {
-    if (standingsFailed || (!division && !(showWildCard && wildCard))) return null;
-    const leagueAbbr = divisionName ? divisionName.split(" ")[0] : "";
-    return (
-      <div style={{ marginTop: 8, paddingTop: 8, borderTop: `1px solid ${T.border}` }}>
-        {division && (
-          <>
-            <div style={{ fontSize: 10, fontWeight: 700, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.06em" }}>
-              {divisionName}
-            </div>
-            <StandingsTable rows={division} gbKey="gb" highlightAbbr={abbreviation} />
-          </>
-        )}
-        {showWildCard && wildCard && (
-          <>
-            <div style={{ fontSize: 10, fontWeight: 700, color: T.textMuted, textTransform: "uppercase", letterSpacing: "0.06em", marginTop: 8 }}>
-              {leagueAbbr} Wild Card
-            </div>
-            <StandingsTable rows={wildCard} gbKey="wcGb" highlightAbbr={abbreviation} />
-          </>
-        )}
-      </div>
-    );
-  };
 
   let body;
   if (loading) {
@@ -539,8 +546,8 @@ function TeamCard({ sport, league, abbreviation, name, showWildCard = true, cont
   } else {
     body = (
       <>
-        {away && <TeamRow c={away} />}
-        {home && <TeamRow c={home} />}
+        {away && <TeamRow c={away} abbreviation={abbreviation} />}
+        {home && <TeamRow c={home} abbreviation={abbreviation} />}
         <div style={{
           marginTop: 6, display: "flex", alignItems: "center", gap: 6,
           color: isLive ? T.success : T.textSecondary, fontSize: 11, fontWeight: 700,
@@ -557,21 +564,30 @@ function TeamCard({ sport, league, abbreviation, name, showWildCard = true, cont
     <Card style={{ borderTop: `2px solid ${accent}`, borderTopLeftRadius: 10, borderTopRightRadius: 10, padding: "16px 18px", height: "100%", overflowY: "auto" }}>
       <SectionLabel>{name}</SectionLabel>
       {body}
-      {contentLevel !== "compact" && !loading && !failed && game && <BoxScore />}
-      {contentLevel !== "compact" && !loading && !failed && game && <ProbablePitcher />}
-      {contentLevel !== "compact" && !loading && !failed && game && <Leaders />}
-      {contentLevel === "full" && <UpcomingGames />}
-      {contentLevel === "full" && <Standings />}
+      {contentLevel !== "compact" && !loading && !failed && game && <BoxScore away={away} home={home} abbreviation={abbreviation} innings={innings} />}
+      {contentLevel !== "compact" && !loading && !failed && game && <ProbablePitcher isPre={isPre} trackedTeam={trackedTeam} />}
+      {contentLevel !== "compact" && !loading && !failed && game && <Leaders trackedTeam={trackedTeam} />}
+      {contentLevel === "full" && <UpcomingGames upcoming={upcoming} />}
+      {contentLevel === "full" && (
+        <Standings
+          standingsFailed={standingsFailed}
+          division={division}
+          wildCard={wildCard}
+          showWildCard={showWildCard}
+          divisionName={divisionName}
+          abbreviation={abbreviation}
+        />
+      )}
     </Card>
   );
-}
+});
 
 // ─── Widget Grid (drag-to-move / drag-to-resize) ───────────────────────────
 
 function WidgetGrid({ widgets, onLayoutChange }) {
   const [dragState, setDragState] = useState(null); // { id, mode, startClientX, startClientY, startLayout, candidate, blocked }
 
-  const enabled = widgets.filter(w => w.enabled !== false);
+  const enabled = useMemo(() => widgets.filter(w => w.enabled !== false), [widgets]);
   const maxY = Math.max(10, ...enabled.map(w => {
     const layout = (dragState && dragState.id === w.id) ? dragState.candidate : w.layout;
     return layout.y + layout.h;
