@@ -3,11 +3,46 @@ import { T } from "../theme";
 import { compressImage } from "../utils";
 import { Card, SectionLabel, Toggle, IconBtn } from "./Primitives";
 import { NotifIcon } from "./Notifications";
-import { findFreePosition } from "./Widgets";
+import { findFreePosition, getWidgetType } from "./Widgets";
 
 // ─── Settings Panel ──────────────────────────────────────────────────────
 // WebSocket connections, display prefs, score widget management, and
 // per-app/keyword notification icon rules.
+
+// Quotes are edited as plain text, one per line, with an optional
+// "quote text | Author" pipe suffix. These two helpers convert between that
+// textarea representation and the { text, author } shape QuoteCard expects.
+function parseQuotesText(text) {
+  return text
+    .split("\n")
+    .map(line => line.trim())
+    .filter(Boolean)
+    .map(line => {
+      const [rawText, rawAuthor] = line.split("|");
+      const quoteText = rawText.trim();
+      const author = rawAuthor ? rawAuthor.trim() : null;
+      return author ? { text: quoteText, author } : { text: quoteText };
+    });
+}
+
+function quotesToText(quotes) {
+  return (quotes || [])
+    .map(q => {
+      if (typeof q === "string") return q;
+      return q.author ? `${q.text} | ${q.author}` : q.text;
+    })
+    .join("\n");
+}
+
+// Sport/league are fixed rather than free-typed — the standings/wild-card
+// math (TEAM_DIVISIONS etc. in Widgets.jsx) only actually understands MLB
+// baseball today, so there's nothing meaningful to choose there yet.
+const WIDGET_TYPE_OPTIONS = [
+  { value: "team", label: "Baseball" },
+  { value: "quote", label: "Daily quote" },
+];
+const TEAM_WIDGET_SPORT = "baseball";
+const TEAM_WIDGET_LEAGUE = "mlb";
 
 function SettingsPanel({ connections, activeConnectionId, onConnectionsChange, onActiveChange, timeMode, onTimeModeChange, iconRules, onIconRulesChange, teamWidgets, onTeamWidgetsChange }) {
   const [editingConn, setEditingConn]   = useState(null);
@@ -15,7 +50,7 @@ function SettingsPanel({ connections, activeConnectionId, onConnectionsChange, o
   const [ruleForm, setRuleForm] = useState({ name: "", matchType: "app", matchValue: "", iconType: "emoji", iconData: "", iconShape: "circle" });
   const [connForm, setConnForm]         = useState({ name: "", url: "" });
   const [editingWidget, setEditingWidget] = useState(null);
-  const [widgetForm, setWidgetForm] = useState({ name: "", sport: "baseball", league: "mlb", abbreviation: "", showWildCard: true });
+  const [widgetForm, setWidgetForm] = useState({ type: "team", name: "", abbreviation: "", showWildCard: true, quotesText: "" });
   const fileInputRef = useRef(null);
 
   const startEditConn = (conn) => {
@@ -81,29 +116,56 @@ function SettingsPanel({ connections, activeConnectionId, onConnectionsChange, o
   };
 
   const startEditWidget = (w) => {
-    setWidgetForm({ name: w.name, sport: w.sport, league: w.league, abbreviation: w.abbreviation, showWildCard: w.showWildCard !== false });
+    const type = getWidgetType(w);
+    if (type === "quote") {
+      setWidgetForm({
+        type: "quote", name: w.name, abbreviation: "", showWildCard: true,
+        quotesText: quotesToText(w.quotes),
+      });
+    } else {
+      setWidgetForm({
+        type: "team", name: w.name, abbreviation: w.abbreviation,
+        showWildCard: w.showWildCard !== false, quotesText: "",
+      });
+    }
     setEditingWidget(w.id);
   };
 
   const startNewWidget = () => {
-    setWidgetForm({ name: "", sport: "baseball", league: "mlb", abbreviation: "", showWildCard: true });
+    setWidgetForm({ type: "team", name: "", abbreviation: "", showWildCard: true, quotesText: "" });
     setEditingWidget("new");
   };
 
   const saveWidget = () => {
     const name = widgetForm.name.trim();
-    const sport = widgetForm.sport.trim().toLowerCase();
-    const league = widgetForm.league.trim().toLowerCase();
+    if (!name) return;
+
+    if (widgetForm.type === "quote") {
+      const quotes = parseQuotesText(widgetForm.quotesText);
+      if (quotes.length === 0) return;
+
+      if (editingWidget === "new") {
+        const id = `widget-${Date.now()}`;
+        const others = teamWidgets.filter(w => w.enabled !== false).map(w => ({ id: w.id, layout: w.layout }));
+        const layout = findFreePosition(others, 4, 10);
+        onTeamWidgetsChange([...teamWidgets, { id, type: "quote", name, quotes, enabled: true, layout }]);
+      } else {
+        onTeamWidgetsChange(teamWidgets.map(w => w.id === editingWidget ? { ...w, type: "quote", name, quotes } : w));
+      }
+      setEditingWidget(null);
+      return;
+    }
+
     const abbreviation = widgetForm.abbreviation.trim().toUpperCase();
-    if (!name || !sport || !league || !abbreviation) return;
+    if (!abbreviation) return;
 
     if (editingWidget === "new") {
       const id = `widget-${Date.now()}`;
       const others = teamWidgets.filter(w => w.enabled !== false).map(w => ({ id: w.id, layout: w.layout }));
       const layout = findFreePosition(others, 4, 10);
-      onTeamWidgetsChange([...teamWidgets, { id, name, sport, league, abbreviation, showWildCard: widgetForm.showWildCard, enabled: true, layout }]);
+      onTeamWidgetsChange([...teamWidgets, { id, type: "team", name, sport: TEAM_WIDGET_SPORT, league: TEAM_WIDGET_LEAGUE, abbreviation, showWildCard: widgetForm.showWildCard, enabled: true, layout }]);
     } else {
-      onTeamWidgetsChange(teamWidgets.map(w => w.id === editingWidget ? { ...w, name, sport, league, abbreviation, showWildCard: widgetForm.showWildCard } : w));
+      onTeamWidgetsChange(teamWidgets.map(w => w.id === editingWidget ? { ...w, type: "team", name, sport: TEAM_WIDGET_SPORT, league: TEAM_WIDGET_LEAGUE, abbreviation, showWildCard: widgetForm.showWildCard } : w));
     }
     setEditingWidget(null);
   };
@@ -213,33 +275,37 @@ function SettingsPanel({ connections, activeConnectionId, onConnectionsChange, o
       <Card>
         <SectionLabel>Score Widgets</SectionLabel>
         <div style={{ color: T.textSecondary, fontSize: 12, marginBottom: 12, lineHeight: 1.6 }}>
-          Choose which teams show up as score cards in the sidebar. Position and size are set directly on the
-          dashboard — drag the ⠿ handle to move a widget, or drag its bottom-right corner to resize it; it'll
-          snap into the grid and won't drop onto another widget.
+          Choose Baseball to track a team, or Daily quote for a rotating quote card. Position and size are set
+          directly on the dashboard — drag the ⠿ handle to move a widget, or drag its bottom-right corner to
+          resize it; it'll snap into the grid and won't drop onto another widget.
         </div>
 
         <div style={{ display: "flex", flexDirection: "column", gap: 7, marginBottom: 8 }}>
-          {teamWidgets.map((w) => (
-            <div key={w.id}
-              style={{
-                display: "flex", alignItems: "center", gap: 10,
-                background: T.elevated, borderRadius: 8, padding: "9px 12px",
-                border: `1px solid ${T.border}`,
-                opacity: w.enabled === false ? 0.55 : 1,
-                transition: "opacity 0.15s",
-              }}
-            >
-              <Toggle value={w.enabled !== false} onChange={v => toggleWidgetEnabled(w.id, v)} />
-              <div style={{ flex: 1, minWidth: 0, cursor: "pointer" }} onClick={() => startEditWidget(w)}>
-                <div style={{ color: T.textPrimary, fontSize: 13, fontWeight: 600 }}>{w.name}</div>
-                <div style={{ color: T.textSecondary, fontSize: 11, fontFamily: "'JetBrains Mono', monospace" }}>
-                  {w.sport} / {w.league} / {w.abbreviation}
+          {teamWidgets.map((w) => {
+            const type = getWidgetType(w);
+            const quoteCount = (w.quotes || []).length;
+            return (
+              <div key={w.id}
+                style={{
+                  display: "flex", alignItems: "center", gap: 10,
+                  background: T.elevated, borderRadius: 8, padding: "9px 12px",
+                  border: `1px solid ${T.border}`,
+                  opacity: w.enabled === false ? 0.55 : 1,
+                  transition: "opacity 0.15s",
+                }}
+              >
+                <Toggle value={w.enabled !== false} onChange={v => toggleWidgetEnabled(w.id, v)} />
+                <div style={{ flex: 1, minWidth: 0, cursor: "pointer" }} onClick={() => startEditWidget(w)}>
+                  <div style={{ color: T.textPrimary, fontSize: 13, fontWeight: 600 }}>{w.name}</div>
+                  <div style={{ color: T.textSecondary, fontSize: 11, fontFamily: "'JetBrains Mono', monospace" }}>
+                    {type === "quote" ? `${quoteCount} quote${quoteCount === 1 ? "" : "s"}` : `Baseball · ${w.abbreviation}`}
+                  </div>
                 </div>
+                <IconBtn onClick={() => startEditWidget(w)} color={T.textMuted} size={14} title="Edit">✎</IconBtn>
+                <IconBtn onClick={() => deleteWidget(w.id)} color={T.textMuted} size={16} title="Delete">×</IconBtn>
               </div>
-              <IconBtn onClick={() => startEditWidget(w)} color={T.textMuted} size={14} title="Edit">✎</IconBtn>
-              <IconBtn onClick={() => deleteWidget(w.id)} color={T.textMuted} size={16} title="Delete">×</IconBtn>
-            </div>
-          ))}
+            );
+          })}
 
           {teamWidgets.length === 0 && (
             <div style={{ color: T.textSecondary, fontSize: 13, padding: "4px 0" }}>No widgets added yet.</div>
@@ -250,27 +316,48 @@ function SettingsPanel({ connections, activeConnectionId, onConnectionsChange, o
           <div style={formStyle} onClick={(e) => e.stopPropagation()}>
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
               <div>
+                <div style={{ color: T.textSecondary, fontSize: 12, marginBottom: 4, fontWeight: 500 }}>Widget type</div>
+                <select value={widgetForm.type} onChange={e => setWidgetForm(f => ({ ...f, type: e.target.value }))}
+                  style={{ ...inputStyle, cursor: "pointer" }}>
+                  {WIDGET_TYPE_OPTIONS.map(opt => (
+                    <option key={opt.value} value={opt.value}>{opt.label}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
                 <div style={{ color: T.textSecondary, fontSize: 12, marginBottom: 4, fontWeight: 500 }}>Display name</div>
-                <input style={inputStyle} value={widgetForm.name} onChange={e => setWidgetForm(f => ({ ...f, name: e.target.value }))} placeholder="e.g. Red Sox" />
+                <input style={inputStyle} value={widgetForm.name} onChange={e => setWidgetForm(f => ({ ...f, name: e.target.value }))} placeholder={widgetForm.type === "quote" ? "e.g. Quote of the Day" : "e.g. Red Sox"} />
               </div>
-              <div style={{ display: "flex", gap: 8 }}>
-                <div style={{ flex: 1 }}>
-                  <div style={{ color: T.textSecondary, fontSize: 12, marginBottom: 4, fontWeight: 500 }}>Sport</div>
-                  <input style={inputStyle} value={widgetForm.sport} onChange={e => setWidgetForm(f => ({ ...f, sport: e.target.value }))} placeholder="baseball" />
+
+              {widgetForm.type === "quote" ? (
+                <div>
+                  <div style={{ color: T.textSecondary, fontSize: 12, marginBottom: 4, fontWeight: 500 }}>
+                    Quotes — one per line, optionally "quote text | Author"
+                  </div>
+                  <textarea
+                    style={{ ...inputStyle, minHeight: 120, fontFamily: "inherit", resize: "vertical" }}
+                    value={widgetForm.quotesText}
+                    onChange={e => setWidgetForm(f => ({ ...f, quotesText: e.target.value }))}
+                    placeholder={"The only way to do great work is to love what you do. | Steve Jobs\nSimplicity is the ultimate sophistication. | Leonardo da Vinci"}
+                  />
+                  <div style={{ color: T.textMuted, fontSize: 11.5, marginTop: 6 }}>
+                    One is picked at random each day and stays the same until the next day.
+                  </div>
                 </div>
-                <div style={{ flex: 1 }}>
-                  <div style={{ color: T.textSecondary, fontSize: 12, marginBottom: 4, fontWeight: 500 }}>League</div>
-                  <input style={inputStyle} value={widgetForm.league} onChange={e => setWidgetForm(f => ({ ...f, league: e.target.value }))} placeholder="mlb" />
-                </div>
-                <div style={{ flex: 1 }}>
-                  <div style={{ color: T.textSecondary, fontSize: 12, marginBottom: 4, fontWeight: 500 }}>Team abbr</div>
-                  <input style={{ ...inputStyle, fontFamily: "'JetBrains Mono', monospace" }}
-                    value={widgetForm.abbreviation}
-                    onChange={e => setWidgetForm(f => ({ ...f, abbreviation: e.target.value }))}
-                    placeholder="BOS" />
-                </div>
-              </div>
-              <Toggle value={widgetForm.showWildCard} onChange={v => setWidgetForm(f => ({ ...f, showWildCard: v }))} label="Show wild card standings" />
+              ) : (
+                <>
+                  <div>
+                    <div style={{ color: T.textSecondary, fontSize: 12, marginBottom: 4, fontWeight: 500 }}>Team abbreviation</div>
+                    <input style={{ ...inputStyle, fontFamily: "'JetBrains Mono', monospace" }}
+                      value={widgetForm.abbreviation}
+                      onChange={e => setWidgetForm(f => ({ ...f, abbreviation: e.target.value }))}
+                      placeholder="BOS" />
+                  </div>
+                  <Toggle value={widgetForm.showWildCard} onChange={v => setWidgetForm(f => ({ ...f, showWildCard: v }))} label="Show wild card standings" />
+                </>
+              )}
+
               {editingWidget === "new" && (
                 <div style={{ color: T.textMuted, fontSize: 11.5 }}>
                   It'll be placed in the first open spot on the dashboard — drag it wherever you like after adding.

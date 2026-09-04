@@ -7,7 +7,7 @@ import {
 } from "./filters";
 import { Dot, Tag, IconBtn, Pill, BatteryBar, StatSkeleton, Card } from "./components/Primitives";
 import { NotificationCard, DateDivider } from "./components/Notifications";
-import { DEFAULT_TEAM_WIDGETS, normalizeWidgets, WidgetGrid } from "./components/Widgets";
+import { DEFAULT_WIDGETS, normalizeWidgets, WidgetGrid } from "./components/Widgets";
 import SettingsPanel from "./components/Settingspanel";
 
 const MAX_BACKOFF_ATTEMPTS = 6;
@@ -37,7 +37,7 @@ export default function App() {
 
   const [timeMode, setTimeMode]     = useState(() => load("nd_timemode", "absolute"));
   const [iconRules, setIconRules]   = useState(() => load("nd_iconrules", []));
-  const [teamWidgets, setTeamWidgets] = useState(() => normalizeWidgets(load("nd_teamwidgets", DEFAULT_TEAM_WIDGETS)));
+  const [teamWidgets, setTeamWidgets] = useState(() => normalizeWidgets(load("nd_teamwidgets", DEFAULT_WIDGETS)));
 
   const [activeTab, setActiveTab]     = useState("all");
   const [filter, setFilter]           = useState("All");

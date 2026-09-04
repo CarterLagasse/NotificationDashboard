@@ -17,10 +17,38 @@ const CONTAINER_W = GRID_COLS * CELL_W + (GRID_COLS - 1) * GRID_GAP;
 
 // Default set of score widgets. User-editable from Settings > Score Widgets
 // from here on — this is only the seed value used the very first time.
+// Every widget carries a `type` ("team" | "quote") so WidgetGrid knows which
+// card component to render; widgets saved before this field existed are
+// treated as "team" for backward compatibility (see getWidgetType below).
 const DEFAULT_TEAM_WIDGETS = [
-  { id: "widget-bos", sport: "baseball", league: "mlb", abbreviation: "BOS", name: "Red Sox", showWildCard: true, enabled: true, layout: { x: 0, y: 0, w: 8, h: 18 } },
+  { id: "widget-bos", type: "team", sport: "baseball", league: "mlb", abbreviation: "BOS", name: "Red Sox", showWildCard: true, enabled: true, layout: { x: 0, y: 0, w: 8, h: 18 } },
 ];
 const TEAM_REFRESH_MS = 60000;
+
+// Default set of daily-quote widgets, same seed-value caveat as above.
+const DEFAULT_QUOTE_WIDGETS = [
+  {
+    id: "widget-quote-1",
+    type: "quote",
+    name: "Quote of the Day",
+    quotes: [
+      { text: "The only way to do great work is to love what you do.", author: "Steve Jobs" },
+      { text: "Simplicity is the ultimate sophistication.", author: "Leonardo da Vinci" },
+      { text: "The best way out is always through.", author: "Robert Frost" },
+    ],
+    enabled: true,
+    layout: { x: 0, y: 18, w: 4, h: 10 },
+  },
+];
+
+// Combined seed list used the very first time a fresh install has no saved
+// widgets. Existing installs keep whatever's in localStorage untouched.
+const DEFAULT_WIDGETS = [...DEFAULT_TEAM_WIDGETS, ...DEFAULT_QUOTE_WIDGETS];
+
+// Widgets saved before the `type` field existed are all team-score widgets.
+function getWidgetType(widget) {
+  return widget.type || "team";
+}
 
 // ─── Widget grid geometry helpers ────────────────────────────────────────
 function normalizeLayout(layout) {
@@ -582,6 +610,80 @@ const TeamCard = memo(function TeamCard({ sport, league, abbreviation, name, sho
   );
 });
 
+// ─── Daily Quote Card ─────────────────────────────────────────────────────
+// Picks one quote from the widget's configured list, deterministically keyed
+// off the calendar day — so it's stable across reloads and across the
+// component's normal 60s-ish lifecycle, but rotates once a day. A poll every
+// minute checks whether the date has actually rolled over; it doesn't refetch
+// anything, just recomputes the index locally.
+
+// Simple string hash (djb2-ish) so the daily pick is deterministic per date
+// without needing a random seed stored anywhere.
+function hashStringToInt(str) {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    hash = (hash * 31 + str.charCodeAt(i)) | 0;
+  }
+  return Math.abs(hash);
+}
+
+function todayKey() {
+  return new Date().toDateString();
+}
+
+function getDailyQuoteIndex(dateKey, count) {
+  if (!count) return -1;
+  return hashStringToInt(dateKey) % count;
+}
+
+// Quotes can be plain strings or { text, author } objects — normalize so the
+// card only has to deal with one shape.
+function normalizeQuote(q) {
+  if (typeof q === "string") return { text: q, author: null };
+  return { text: q?.text ?? "", author: q?.author ?? null };
+}
+
+const QuoteCard = memo(function QuoteCard({ name = "Quote of the Day", quotes = [] }) {
+  const [dateKey, setDateKey] = useState(todayKey());
+
+  useEffect(() => {
+    const id = setInterval(() => {
+      const k = todayKey();
+      setDateKey(prev => (prev !== k ? k : prev));
+    }, 60000);
+    return () => clearInterval(id);
+  }, []);
+
+  const quote = useMemo(() => {
+    const idx = getDailyQuoteIndex(dateKey, quotes.length);
+    return idx >= 0 ? normalizeQuote(quotes[idx]) : null;
+  }, [dateKey, quotes]);
+
+  return (
+    <Card style={{
+      borderTop: `2px solid ${T.primary}`, borderTopLeftRadius: 10, borderTopRightRadius: 10,
+      padding: "16px 18px", height: "100%", overflowY: "auto",
+      display: "flex", flexDirection: "column",
+    }}>
+      <SectionLabel>{name}</SectionLabel>
+      {!quote ? (
+        <div style={{ color: T.textSecondary, fontSize: 13, marginTop: 8 }}>No quotes configured.</div>
+      ) : (
+        <div style={{ marginTop: 10, flex: 1, display: "flex", flexDirection: "column", justifyContent: "center" }}>
+          <div style={{ fontSize: 15, fontStyle: "italic", lineHeight: 1.5, color: T.textPrimary }}>
+            “{quote.text}”
+          </div>
+          {quote.author && (
+            <div style={{ marginTop: 10, fontSize: 12, fontWeight: 600, color: T.textMuted, textAlign: "right" }}>
+              — {quote.author}
+            </div>
+          )}
+        </div>
+      )}
+    </Card>
+  );
+});
+
 // ─── Widget Grid (drag-to-move / drag-to-resize) ───────────────────────────
 
 function WidgetGrid({ widgets, onLayoutChange }) {
@@ -668,6 +770,7 @@ function WidgetGrid({ widgets, onLayoutChange }) {
         const layout = isDragging ? dragState.candidate : w.layout;
         const px = gridToPx(layout);
         const contentLevel = layout.h >= 16 && layout.w >= 4 ? "full" : layout.h >= 9 ? "standard" : "compact";
+        const widgetType = getWidgetType(w);
 
         return (
           <div key={w.id} style={{
@@ -682,11 +785,15 @@ function WidgetGrid({ widgets, onLayoutChange }) {
               outlineOffset: 2, borderRadius: 12,
               opacity: isDragging && dragState.blocked ? 0.7 : 1,
             }}>
-              <TeamCard
-                sport={w.sport} league={w.league} abbreviation={w.abbreviation}
-                name={w.name} showWildCard={w.showWildCard !== false}
-                contentLevel={contentLevel}
-              />
+              {widgetType === "quote" ? (
+                <QuoteCard name={w.name} quotes={w.quotes} />
+              ) : (
+                <TeamCard
+                  sport={w.sport} league={w.league} abbreviation={w.abbreviation}
+                  name={w.name} showWildCard={w.showWildCard !== false}
+                  contentLevel={contentLevel}
+                />
+              )}
 
               {/* Drag handle — move the widget */}
               <div
@@ -730,7 +837,8 @@ function WidgetGrid({ widgets, onLayoutChange }) {
 
 export {
   GRID_COLS, GRID_GAP, CELL_W, ROW_H, MIN_W, MIN_H, CONTAINER_W,
-  DEFAULT_TEAM_WIDGETS, TEAM_REFRESH_MS,
+  DEFAULT_TEAM_WIDGETS, DEFAULT_QUOTE_WIDGETS, DEFAULT_WIDGETS, TEAM_REFRESH_MS, getWidgetType,
   normalizeLayout, rectsOverlap, isFreeSpot, findFreePosition, normalizeWidgets, gridToPx,
-  TeamCard, WidgetGrid,
+  normalizeQuote, getDailyQuoteIndex,
+  TeamCard, QuoteCard, WidgetGrid,
 };
