@@ -114,6 +114,7 @@ const NotificationCard = memo(function NotificationCard({ notification: n, onDel
   // (e.g. sibling cards' hover state, selection toggles elsewhere in the list).
   const iconRule = useMemo(
     () => resolveIcon(n, iconRules, parsedKeywordRules),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [n.packageName, n.title, n.text, n.appName, iconRules, parsedKeywordRules]
   );
 

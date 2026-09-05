@@ -44,7 +44,7 @@ const WIDGET_TYPE_OPTIONS = [
 const TEAM_WIDGET_SPORT = "baseball";
 const TEAM_WIDGET_LEAGUE = "mlb";
 
-function SettingsPanel({ connections, activeConnectionId, onConnectionsChange, onActiveChange, timeMode, onTimeModeChange, iconRules, onIconRulesChange, teamWidgets, onTeamWidgetsChange }) {
+function SettingsPanel({ connections, activeConnectionId, onConnectionsChange, onActiveChange, timeMode, onTimeModeChange, iconRules, onIconRulesChange, teamWidgets, onTeamWidgetsChange, maxKeep, onMaxKeepChange, notificationCount }) {
   const [editingConn, setEditingConn]   = useState(null);
   const [editingRule, setEditingRule]   = useState(null);
   const [ruleForm, setRuleForm] = useState({ name: "", matchType: "app", matchValue: "", iconType: "emoji", iconData: "", iconShape: "circle" });
@@ -270,6 +270,25 @@ function SettingsPanel({ connections, activeConnectionId, onConnectionsChange, o
           onChange={v => onTimeModeChange(v ? "relative" : "absolute")}
           label={timeMode === "relative" ? "Showing time since received (e.g. 5m ago)" : "Showing exact date and time"}
         />
+      </Card>
+
+      <Card>
+        <SectionLabel>Storage</SectionLabel>
+        <div style={{ color: T.textSecondary, fontSize: 12, marginBottom: 10, lineHeight: 1.6 }}>
+          Cap how many notifications are kept. Oldest non-starred, non-grouped are trimmed first. Currently storing <span style={{ color: T.textPrimary, fontWeight: 700 }}>{notificationCount ?? 0}</span>.
+        </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {[250, 500, 1000, 0].map(v => (
+            <button key={v} onClick={() => onMaxKeepChange(v)} style={{
+              background: maxKeep === v ? T.primary : T.elevated,
+              color: maxKeep === v ? "#fff" : T.textSecondary,
+              border: `1px solid ${maxKeep === v ? T.primary : T.border}`,
+              borderRadius: 7, padding: "6px 14px", cursor: "pointer", fontSize: 13, fontWeight: maxKeep === v ? 700 : 500,
+            }}>
+              {v === 0 ? "Unlimited" : v}
+            </button>
+          ))}
+        </div>
       </Card>
 
       <Card>

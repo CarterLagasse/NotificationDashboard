@@ -1,6 +1,6 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import { T } from "./theme";
-import { load, save, generateId, formatDate, formatDuration } from "./utils";
+import { load, save, saveDebounced, generateId, formatDate, formatDuration } from "./utils";
 import {
   JUNK_PREFIXES, JUNK_PACKAGES,
   passesAppAllowlist, passesAppBannedExact, passesAppBannedPrefixes, passesJunkHeaderKeywords,
@@ -8,18 +8,30 @@ import {
 import { Dot, Tag, IconBtn, Pill, BatteryBar, StatSkeleton, Card } from "./components/Primitives";
 import { NotificationCard, DateDivider } from "./components/Notifications";
 import { DEFAULT_WIDGETS, normalizeWidgets, WidgetGrid } from "./components/Widgets";
+import { Virtuoso } from "react-virtuoso";
 import SettingsPanel from "./components/Settingspanel";
 
 const MAX_BACKOFF_ATTEMPTS = 6;
 const BASE_DELAY_MS = 2000;
 const SLOW_RETRY_MS = 60000;
+const DEFAULT_MAX_NOTIFICATIONS = 500;
+const DUPLICATE_WINDOW_MS = 2000;
 
 // ─── Main App ─────────────────────────────────────────────────────────────────
 
 export default function App() {
-  const [notifications, setNotifications] = useState(() => load("nd_notifications", []));
+  const [maxKeep, setMaxKeep] = useState(() => load("nd_max_keep", DEFAULT_MAX_NOTIFICATIONS));
+  const [notifications, setNotifications] = useState(() => {
+    const all = load("nd_notifications", []);
+    const cap = load("nd_max_keep", DEFAULT_MAX_NOTIFICATIONS);
+    if (cap === 0 || all.length <= cap) return all;
+    const keepStarred = all.filter(n => n.starred || n.group);
+    const rest = all.filter(n => !n.starred && !n.group);
+    return [...keepStarred, ...rest.slice(0, Math.max(0, cap - keepStarred.length))].sort((a, b) => b.timestamp - a.timestamp);
+  });
   const [deletedIds, setDeletedIds]       = useState(() => load("nd_deleted", []));
-  const deletedSetRef = useRef(new Set(load("nd_deleted", [])));
+  const deletedSetRef = useRef(null);
+  if (deletedSetRef.current === null) deletedSetRef.current = new Set(deletedIds);
   const [newIds, setNewIds]               = useState(new Set());
 
   const [connections, setConnections]           = useState(() => load("nd_connections", []));
@@ -49,14 +61,27 @@ export default function App() {
   const [newGroupName, setNewGroupName]     = useState("");
   const [showGroupInput, setShowGroupInput] = useState(false);
 
-  useEffect(() => { save("nd_notifications", notifications); }, [notifications]);
-  useEffect(() => { save("nd_deleted", deletedIds); }, [deletedIds]);
-  useEffect(() => { save("nd_groups", groups); }, [groups]);
-  useEffect(() => { save("nd_connections", connections); }, [connections]);
+  const saveTimersRef = useRef({});
+  useEffect(() => { saveDebounced("nd_max_keep", maxKeep, saveTimersRef.current); }, [maxKeep]);
+  useEffect(() => {
+    if (maxKeep !== 0 && notifications.length > maxKeep) {
+      setNotifications(prev => {
+        if (prev.length <= maxKeep) return prev;
+        const keepStarred = prev.filter(n => n.starred || n.group);
+        const rest = prev.filter(n => !n.starred && !n.group);
+        const keepCount = Math.max(0, maxKeep - keepStarred.length);
+        return [...keepStarred, ...rest.slice(0, keepCount)].sort((a, b) => b.timestamp - a.timestamp);
+      });
+    }
+  }, [maxKeep, notifications.length]);
+  useEffect(() => { saveDebounced("nd_notifications", notifications, saveTimersRef.current); }, [notifications]);
+  useEffect(() => { saveDebounced("nd_deleted", deletedIds, saveTimersRef.current); }, [deletedIds]);
+  useEffect(() => { saveDebounced("nd_groups", groups, saveTimersRef.current); }, [groups]);
+  useEffect(() => { saveDebounced("nd_connections", connections, saveTimersRef.current); }, [connections]);
   useEffect(() => { save("nd_active_conn", activeConnectionId); }, [activeConnectionId]);
-  useEffect(() => { save("nd_timemode", timeMode); }, [timeMode]);
-  useEffect(() => { save("nd_iconrules", iconRules); }, [iconRules]);
-  useEffect(() => { save("nd_teamwidgets", teamWidgets); }, [teamWidgets]);
+  useEffect(() => { saveDebounced("nd_timemode", timeMode, saveTimersRef.current); }, [timeMode]);
+  useEffect(() => { saveDebounced("nd_iconrules", iconRules, saveTimersRef.current); }, [iconRules]);
+  useEffect(() => { saveDebounced("nd_teamwidgets", teamWidgets, saveTimersRef.current); }, [teamWidgets]);
 
   useEffect(() => {
     if (!showConnMenu) return;
@@ -65,40 +90,58 @@ export default function App() {
     return () => document.removeEventListener("mousedown", h);
   }, [showConnMenu]);
 
-  const activeConnection = connections.find(c => c.id === activeConnectionId) ?? null;
-  const DUPLICATE_WINDOW_MS = 2000;
+  const activeConnection = useMemo(() => connections.find(c => c.id === activeConnectionId) ?? null, [connections, activeConnectionId]);
 
-  const mergeNotifications = (incoming) => {
+  const mergeNotifications = useCallback((incoming) => {
     setNotifications(prev => {
       const existingIds = new Map(prev.map(n => [n.id, n]));
+      // Index by packageName for O(1) near-duplicate checks instead of merged.some()
+      const byPackage = new Map();
+      for (const n of prev) {
+        if (!byPackage.has(n.packageName)) byPackage.set(n.packageName, []);
+        byPackage.get(n.packageName).push(n);
+      }
       const merged = [...prev];
       const brandNew = [];
 
       for (const n of incoming) {
         if (deletedSetRef.current.has(n.id)) continue;
 
-        // Check for a near-duplicate: same app + title + text within a short time window
-        const isDuplicate = merged.some(existing =>
-          existing.packageName === n.packageName &&
+        const candidates = byPackage.get(n.packageName) || [];
+        const isDuplicate = candidates.some(existing =>
           existing.title === n.title &&
           existing.text === n.text &&
           Math.abs(existing.timestamp - n.timestamp) <= DUPLICATE_WINDOW_MS
         );
         if (isDuplicate) continue;
 
-        if (!existingIds.has(n.id)) { merged.push(n); brandNew.push(n.id); }
-        else {
+        if (!existingIds.has(n.id)) {
+          merged.push(n);
+          brandNew.push(n.id);
+          if (!byPackage.has(n.packageName)) byPackage.set(n.packageName, []);
+          byPackage.get(n.packageName).push(n);
+        } else {
           const ex = existingIds.get(n.id);
-          merged[merged.indexOf(ex)] = { ...n, starred: ex.starred, group: ex.group };
+          const idx = merged.indexOf(ex);
+          merged[idx] = { ...n, starred: ex.starred, group: ex.group };
         }
       }
       if (brandNew.length > 0) {
-        setNewIds(prev => { const s = new Set(prev); brandNew.forEach(id => s.add(id)); return s; });
-        setTimeout(() => setNewIds(prev => { const s = new Set(prev); brandNew.forEach(id => s.delete(id)); return s; }), 600);
+        setNewIds(prevSet => { const s = new Set(prevSet); brandNew.forEach(id => s.add(id)); return s; });
+        setTimeout(() => setNewIds(prevSet => { const s = new Set(prevSet); brandNew.forEach(id => s.delete(id)); return s; }), 600);
       }
-      return merged.sort((a, b) => b.timestamp - a.timestamp);
+      let sorted = merged.sort((a, b) => b.timestamp - a.timestamp);
+      // Cap history: evict oldest non-starred/non-grouped first (0 = unlimited)
+      const cap = maxKeep;
+      if (cap !== 0 && sorted.length > cap) {
+        const keepStarredOrGrouped = sorted.filter(n => n.starred || n.group);
+        const rest = sorted.filter(n => !n.starred && !n.group);
+        const keepCount = cap - keepStarredOrGrouped.length;
+        sorted = [...keepStarredOrGrouped, ...rest.slice(0, Math.max(0, keepCount))].sort((a, b) => b.timestamp - a.timestamp);
+      }
+      return sorted;
     });
-  };
+  }, [maxKeep]);
 
   const scheduleReconnect = () => {
     if (manualDisconnectRef.current) return;
@@ -124,7 +167,9 @@ export default function App() {
       clearTimeout(reconnectTimerRef.current);
     }
 
-    if (wsRef.current) wsRef.current.close();
+    if (wsRef.current && wsRef.current.readyState !== WebSocket.CLOSED) {
+      try { wsRef.current.close(); } catch {}
+    }
     setConnecting(true);
     setStats({ batteryPct: null, notifCount: null, screenTimeMs: null });
     const ws = new WebSocket(url);
@@ -144,6 +189,7 @@ export default function App() {
     ws.onerror = () => {
       setConnected(false);
       setConnecting(false);
+      scheduleReconnect();
     };
 
     ws.onmessage = (event) => {
@@ -171,18 +217,20 @@ export default function App() {
   };
 
   // Switch the active connection and immediately reconnect to it.
-  const switchConnection = (id) => {
+  const switchConnection = useCallback((id) => {
     setShowConnMenu(false);
     if (id === activeConnectionId) return;
+    clearTimeout(reconnectTimerRef.current);
     setActiveConnectionId(id);
-  };
+  }, [activeConnectionId]);
 
   useEffect(() => {
     return () => {
       clearTimeout(reconnectTimerRef.current);
-      if (wsRef.current) wsRef.current.close();
+      if (wsRef.current && wsRef.current.readyState !== WebSocket.CLOSED) {
+        try { wsRef.current.close(); } catch {}
+      }
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -190,7 +238,7 @@ export default function App() {
       connect(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeConnectionId]);
+  }, [activeConnection]);
 
   const deleteOne = (id) => {
     const n = notifications.find(x => x.id === id);
@@ -225,9 +273,9 @@ export default function App() {
     if (groupFilter === name) setGroupFilter(null);
   };
 
-  const appNames = ["All", ...new Set(notifications.map(n => n.appName))];
+  const appNames = useMemo(() => ["All", ...new Set(notifications.map(n => n.appName))], [notifications]);
 
-  const filtered = notifications.filter(n => {
+  const filtered = useMemo(() => notifications.filter(n => {
     if (activeTab === "all" && (n.starred || n.group)) return false;
     if (activeTab === "starred" && !n.starred) return false;
     if (activeTab === "groups") {
@@ -240,46 +288,36 @@ export default function App() {
       if (![n.title, n.text, n.appName].some(f => f?.toLowerCase().includes(q))) return false;
     }
     return true;
-  });
+  }), [notifications, activeTab, groupFilter, filter, search]);
 
-  const grouped = [];
-  let lastDate = null;
-  for (const n of filtered) {
-    const label = formatDate(n.timestamp);
-    if (label !== lastDate) { grouped.push({ type: "divider", label }); lastDate = label; }
-    grouped.push({ type: "notification", n });
-  }
+  const grouped = useMemo(() => {
+    const g = [];
+    let lastDate = null;
+    for (const n of filtered) {
+      const label = formatDate(n.timestamp);
+      if (label !== lastDate) { g.push({ type: "divider", label }); lastDate = label; }
+      g.push({ type: "notification", n });
+    }
+    return g;
+  }, [filtered]);
 
-  const statusColor = connected ? T.success : connecting ? T.star : T.danger;
+  const statusColor = useMemo(() => connected ? T.success : connecting ? T.star : T.danger, [connected, connecting]);
 
-  const TABS = [
+  const TABS = useMemo(() => [
     { id: "all",      label: "All",      count: notifications.filter(n => !n.starred && !n.group).length },
     { id: "starred",  label: "Starred",  count: notifications.filter(n => n.starred).length },
     { id: "groups",   label: "Groups",   count: null },
     { id: "settings", label: "Settings", count: null },
-  ];
+  ], [notifications]);
 
-  const handleWidgetLayoutChange = (id, layout) => {
+  const handleWidgetLayoutChange = useCallback((id, layout) => {
     setTeamWidgets(prev => prev.map(w => w.id === id ? { ...w, layout } : w));
-  };
+  }, []);
 
-  const activeTeamWidgets = teamWidgets.filter(w => w.enabled !== false);
-
-  return (
-    <div style={{ minHeight: "100vh", background: T.bg, color: T.textMuted, fontFamily: "'Inter', -apple-system, sans-serif" }}>
-      <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600;700&display=swap');
+  const globalStyles = useMemo(() => `
         @keyframes slideIn { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: translateY(0); } }
-        @keyframes pulseRing {
-          0%   { transform: scale(1);   opacity: 0.55; }
-          100% { transform: scale(2.6); opacity: 0; }
-        }
-        @keyframes shimmer {
-          0%   { opacity: 0.35; }
-          50%  { opacity: 0.75; }
-          100% { opacity: 0.35; }
-        }
-        * { box-sizing: border-box; margin: 0; padding: 0; }
+        @keyframes pulseRing { 0% { transform: scale(1); opacity: 0.55; } 100% { transform: scale(2.6); opacity: 0; } }
+        @keyframes shimmer { 0% { opacity: 0.35; } 50% { opacity: 0.75; } 100% { opacity: 0.35; } }
         input, button, select { font-family: inherit; }
         input:focus, select:focus { outline: none; border-color: ${T.primary} !important; }
         select { appearance: none; }
@@ -288,7 +326,11 @@ export default function App() {
         ::-webkit-scrollbar-thumb { background: ${T.textSecondary}; border-radius: 10px; border: 2px solid ${T.elevated}; }
         ::-webkit-scrollbar-thumb:hover { background: ${T.textPrimary}; }
         * { scrollbar-width: auto; scrollbar-color: ${T.textSecondary} ${T.elevated}; }
-      `}</style>
+      `, []);
+
+  return (
+    <div style={{ minHeight: "100vh", background: T.bg, color: T.textMuted, fontFamily: "'Inter', -apple-system, sans-serif" }}>
+      <style>{globalStyles}</style>
 
       <div style={{
         position: "sticky", top: 0, zIndex: 100,
@@ -411,6 +453,9 @@ export default function App() {
             onIconRulesChange={setIconRules}
             teamWidgets={teamWidgets}
             onTeamWidgetsChange={setTeamWidgets}
+            maxKeep={maxKeep}
+            onMaxKeepChange={setMaxKeep}
+            notificationCount={notifications.length}
           />
         ) : (
           <>
@@ -506,6 +551,28 @@ export default function App() {
                     : "Add a connection in Settings and click Connect."}
                 </div>
               </div>
+            ) : grouped.length > 100 ? (
+              <Virtuoso
+                style={{ height: "calc(100vh - 220px)" }}
+                data={grouped}
+                itemContent={(index, item) =>
+                  item.type === "divider"
+                    ? <DateDivider label={item.label} />
+                    : <NotificationCard
+                        notification={item.n}
+                        onDelete={deleteOne}
+                        onStar={toggleStar}
+                        onGroupAssign={assignGroup}
+                        groups={groups}
+                        selected={selected.has(item.n.id)}
+                        onSelect={toggleSelect}
+                        selectMode={selectMode}
+                        isNew={newIds.has(item.n.id)}
+                        timeMode={timeMode}
+                        iconRules={iconRules}
+                      />
+                }
+              />
             ) : (
               grouped.map(item =>
                 item.type === "divider"

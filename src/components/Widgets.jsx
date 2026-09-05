@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo, memo } from "react";
 import { T } from "../theme";
 import { Dot, Card, SectionLabel } from "./Primitives";
+import { cachedFetchJson } from "../hooks/useEspnCache";
 
 // ─── Widget section ──────────────────────────────────────────────────────
 // Score widgets: grid config, layout/geometry helpers, standings math,
@@ -464,18 +465,19 @@ const TeamCard = memo(function TeamCard({ sport, league, abbreviation, name, sho
   const [divisionName, setDivisionName] = useState(null);
 
   useEffect(() => {
+    const ac = new AbortController();
     let cancelled = false;
 
     const loadScoreboard = async () => {
       try {
-        const res = await fetch(`https://site.api.espn.com/apis/site/v2/sports/${sport}/${league}/scoreboard`);
-        const data = await res.json();
+        const data = await cachedFetchJson(`https://site.api.espn.com/apis/site/v2/sports/${sport}/${league}/scoreboard`, ac.signal);
         const events = data.events || [];
         const match = events.find(ev =>
           ev.competitions?.[0]?.competitors?.some(c => c.team?.abbreviation === abbreviation)
         );
         if (!cancelled) { setGame(match || null); setFailed(false); }
-      } catch {
+      } catch (e) {
+        if (e.name === 'AbortError') return;
         if (!cancelled) setFailed(true);
       } finally {
         if (!cancelled) setLoading(false);
@@ -484,7 +486,7 @@ const TeamCard = memo(function TeamCard({ sport, league, abbreviation, name, sho
 
     const loadSchedule = async () => {
       try {
-        const res = await fetch(`https://site.api.espn.com/apis/site/v2/sports/${sport}/${league}/teams/${abbreviation.toLowerCase()}/schedule`);
+        const res = await fetch(`https://site.api.espn.com/apis/site/v2/sports/${sport}/${league}/teams/${abbreviation.toLowerCase()}/schedule`, { signal: ac.signal });
         const data = await res.json();
         const events = data.events || [];
         const next = events
@@ -511,15 +513,15 @@ const TeamCard = memo(function TeamCard({ sport, league, abbreviation, name, sho
             };
           });
         if (!cancelled) setUpcoming(next);
-      } catch {
+      } catch (e) {
+        if (e.name === 'AbortError') return;
         if (!cancelled) setUpcoming([]);
       }
     };
 
     const loadStandings = async () => {
       try {
-        const res = await fetch(`https://site.api.espn.com/apis/v2/sports/${sport}/${league}/standings`);
-        const data = await res.json();
+        const data = await cachedFetchJson(`https://site.api.espn.com/apis/v2/sports/${sport}/${league}/standings`, ac.signal);
         const leaves = collectStandingsLeaves(data);
         const allEntries = leaves.flatMap(leaf => leaf.entries).map(normalizeEntry);
 
@@ -542,7 +544,8 @@ const TeamCard = memo(function TeamCard({ sport, league, abbreviation, name, sho
           setWildCard(wc.length ? wc : null);
           setStandingsFailed(false);
         }
-      } catch {
+      } catch (e) {
+        if (e.name === 'AbortError') return;
         if (!cancelled) setStandingsFailed(true);
       }
     };
@@ -551,7 +554,7 @@ const TeamCard = memo(function TeamCard({ sport, league, abbreviation, name, sho
     loadSchedule();
     loadStandings();
     const id = setInterval(() => { loadScoreboard(); loadSchedule(); loadStandings(); }, TEAM_REFRESH_MS);
-    return () => { cancelled = true; clearInterval(id); };
+    return () => { cancelled = true; ac.abort(); clearInterval(id); };
   }, [sport, league, abbreviation]);
 
   const comp   = game?.competitions?.[0];

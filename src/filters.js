@@ -38,10 +38,12 @@ const APP_BANNED_EXACT = {
 
 const APP_BANNED_PREFIXES = {
   "com.samsung.android.incallui":      ["Call"],
-  "com.android.systemui":              ["Flashlight turned on", "Charging started (", "Charging (", "Edge lighting", "Charge your phone."],
+  // NOTE: com.android.systemui is already in JUNK_PACKAGES above, so its
+  // prefix rules would never fire. Kept here for documentation; remove
+  // from JUNK_PACKAGES if you want prefix-filtering instead of full block.
+  "com.android.systemui":              ["Flashlight turned on", "Charging started (", "Charging (", "Edge lighting", "Charge your phone.", "If you don’t want SOSApp to use this feature, t"],
   "com.google.android.apps.paidtasks": ["Turning on Location History", "Want more surveys? Finish", "New survey available", "Tap to answer survey"],
   "android":                           ["Private DNS", "An open", "If you don’t want SOSApp to use this feature, t"],
-  "com.android.systemui":              ["If you don’t want SOSApp to use this feature, t"],
   "com.google.android.apps.maps":      ["From "],
   "com.sec.android.app.samsungapps":   ["1 update available"],
   "com.samsung.android.forest":        ["Turn down the volume"], // check to make sure this is the right package

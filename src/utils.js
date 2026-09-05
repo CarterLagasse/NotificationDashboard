@@ -33,17 +33,57 @@ function formatDuration(ms) {
   return h > 0 ? `${h}h ${m}m` : `${m}m`;
 }
 
+const STORAGE_VERSION = 2;
+
+function hashStr(str) {
+  let h = 0;
+  for (let i = 0; i < str.length; i++) h = (h * 31 + str.charCodeAt(i)) | 0;
+  return Math.abs(h).toString(36);
+}
+
 function generateId(n) {
-  return `${n.packageName}-${n.timestamp}-${(n.title || "").slice(0, 10)}`;
+  const base = `${n.packageName}-${n.timestamp}`;
+  const content = `${n.title || ""}|${n.text || ""}`;
+  return content ? `${base}-${hashStr(content).slice(0, 8)}` : base;
 }
 
 function load(key, fallback) {
-  try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : fallback; }
-  catch { return fallback; }
+  try {
+    const v = localStorage.getItem(key);
+    if (!v) return fallback;
+    return JSON.parse(v);
+  } catch { return fallback; }
 }
 
+function ensureVersion() {
+  try {
+    const v = localStorage.getItem("nd_version");
+    if (!v) localStorage.setItem("nd_version", JSON.stringify(STORAGE_VERSION));
+    else if (JSON.parse(v) !== STORAGE_VERSION) {
+      localStorage.setItem("nd_version", JSON.stringify(STORAGE_VERSION));
+    }
+  } catch {}
+}
+ensureVersion();
+
 function save(key, value) {
-  try { localStorage.setItem(key, JSON.stringify(value)); } catch {}
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch (e) {
+    if (e?.name === 'QuotaExceededError' || e?.code === 22) {
+      console.warn(`localStorage quota exceeded for ${key} — trimming`);
+      // Try to free space by trimming nd_notifications if that's the culprit
+      if (key === "nd_notifications" && Array.isArray(value)) {
+        try {
+          const trimmed = value.filter(n => n.starred || n.group).concat(value.filter(n => !n.starred && !n.group).slice(0, 250));
+          localStorage.setItem(key, JSON.stringify(trimmed.slice(0, 500)));
+        } catch {}
+      }
+    }
+  }
+}
+
+function saveDebounced(key, value, timers) {
+  clearTimeout(timers[key]);
+  timers[key] = setTimeout(() => save(key, value), 300);
 }
 
 function compressImage(file) {
@@ -76,4 +116,4 @@ function parseKeywords(raw) {
     .filter(Boolean);
 }
 
-export { timeAgo, formatAbsolute, formatDate, formatDuration, generateId, load, save, compressImage, parseKeywords };
+export { STORAGE_VERSION, timeAgo, formatAbsolute, formatDate, formatDuration, generateId, load, save, saveDebounced, compressImage, parseKeywords };
